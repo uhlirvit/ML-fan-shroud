@@ -1,0 +1,20 @@
+# Industrial data: never commit the workbook or anything derived from it
+data/raw/*
+!data/raw/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Python / Jupyter
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

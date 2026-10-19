@@ -1,0 +1,1088 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fan Shroud ML Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Methods guide for the excavator cooling-fan ML framework: what each pipeline step does, which methods are core, and why others wait.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an engineer's field guide. Header, an interactive immersion explorer, then the six pipeline
+   stages as a numbered sequence (stage label left, method cards right), issues, data checklist, glossary. */
+:root {
+  --paper: #f3f4f1;      /* page ground, cool grey with a slight green bias */
+  --panel: #fbfbf9;      /* cards and chart surfaces */
+  --ink: #171b19;
+  --ink-2: #4b524e;
+  --ink-3: #7a817d;
+  --rule: #d9ddd8;
+  --rule-2: #e7e9e5;
+  --amber: #eaa41b;      /* the one accent: "core" verdicts, cursor, best model */
+  --amber-on: #1c1505;
+  --amber-ink: #8a5b00;
+  --amber-wash: rgba(234, 164, 27, 0.16);
+  --steel: #2a78d6;      /* series: steel shroud */
+  --plastic: #1baf7a;    /* series: plastic shroud */
+  --blade: #c9cec9;
+  --warn: #b5441a;
+  --tip-bg: #171b19;
+  --tip-fg: #f3f4f1;
+  --f-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #111412; --panel: #181c1a; --ink: #eceeea; --ink-2: #b8beb9; --ink-3: #868d88;
+    --rule: #2c322f; --rule-2: #222724; --amber: #f0b23a; --amber-on: #1c1505; --amber-ink: #f3c062;
+    --amber-wash: rgba(240, 178, 58, 0.14); --steel: #3987e5; --plastic: #199e70; --blade: #3a413d;
+    --warn: #ec7f55; --tip-bg: #eceeea; --tip-fg: #111412; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #111412; --panel: #181c1a; --ink: #eceeea; --ink-2: #b8beb9; --ink-3: #868d88;
+  --rule: #2c322f; --rule-2: #222724; --amber: #f0b23a; --amber-on: #1c1505; --amber-ink: #f3c062;
+  --amber-wash: rgba(240, 178, 58, 0.14); --steel: #3987e5; --plastic: #199e70; --blade: #3a413d;
+  --warn: #ec7f55; --tip-bg: #eceeea; --tip-fg: #111412; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: var(--f-body); font-size: 15px; line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap {
+  max-width: 1120px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2, h3, h4 { text-wrap: balance; margin: 0; }
+p { margin: 0; }
+code, .mono { font-family: var(--f-mono); font-size: 0.88em; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
+
+/* ---------- header ---------- */
+.masthead { padding-block: 40px 28px; border-bottom: 1px solid var(--rule); }
+.eyebrow {
+  font-family: var(--f-display); font-weight: 600; font-size: 14px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-2); display: flex; gap: 10px; align-items: center;
+}
+.eyebrow::before { content: ""; width: 26px; height: 2px; background: var(--amber); }
+h1 {
+  font-family: var(--f-display); font-weight: 700; font-size: clamp(44px, 7vw, 76px);
+  line-height: 0.95; letter-spacing: -0.01em; margin-top: 12px; text-transform: uppercase;
+}
+.lede { max-width: 62ch; margin-top: 16px; font-size: 17px; color: var(--ink-2); }
+.datasets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.ds {
+  display: inline-flex; gap: 8px; align-items: baseline; padding: 6px 10px; border: 1px solid var(--rule);
+  border-radius: 6px; background: var(--panel); font-size: 13px; color: var(--ink-2);
+}
+.ds b { color: var(--ink); font-weight: 600; }
+.ds .mono { color: var(--ink-3); }
+
+.keybar {
+  display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; justify-content: space-between;
+  margin-top: 24px;
+}
+.key { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--ink-2); }
+.key span { display: inline-flex; gap: 8px; align-items: center; }
+
+.tag {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 4px;
+  font-family: var(--f-display); font-weight: 600; font-size: 12.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; white-space: nowrap; flex: none;
+}
+.tag.core { background: var(--amber); color: var(--amber-on); }
+.tag.opt { border: 1px solid var(--ink-2); color: var(--ink-2); }
+.tag.later { border: 1px dashed var(--ink-3); color: var(--ink-3); }
+
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 7px; overflow: hidden; background: var(--panel); }
+.seg button {
+  font: inherit; font-size: 13px; padding: 6px 12px; border: 0; background: transparent; color: var(--ink-2);
+  cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.seg-label { font-size: 13px; color: var(--ink-3); margin-right: 8px; }
+
+/* ---------- sections ---------- */
+section.block { padding-block: 44px 8px; }
+.sec-head { display: grid; gap: 8px; max-width: 70ch; margin-bottom: 22px; }
+.sec-head .kicker {
+  font-family: var(--f-display); font-weight: 600; font-size: 13px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--amber-ink);
+}
+h2 { font-family: var(--f-display); font-weight: 700; font-size: clamp(30px, 4vw, 40px); line-height: 1.02; text-transform: uppercase; }
+.sec-head p { color: var(--ink-2); }
+
+/* ---------- immersion explorer ---------- */
+.explain-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 900px) { .explain-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.prose { display: grid; gap: 12px; max-width: 64ch; }
+.prose p { color: var(--ink-2); }
+.prose p strong { color: var(--ink); font-weight: 600; }
+.formula {
+  font-family: var(--f-mono); font-size: 13px; background: var(--panel); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 10px 12px; display: grid; gap: 4px; color: var(--ink); overflow-x: auto;
+}
+.formula span { color: var(--ink-3); }
+
+.explorer {
+  margin-top: 22px; display: grid; gap: 0; grid-template-columns: minmax(0, 1fr);
+  border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); overflow: hidden;
+}
+@media (min-width: 900px) { .explorer { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); } }
+.pane { padding: 18px; min-width: 0; display: grid; gap: 12px; align-content: start; }
+.pane + .pane { border-top: 1px solid var(--rule); }
+@media (min-width: 900px) { .pane + .pane { border-top: 0; border-left: 1px solid var(--rule); } }
+.pane-title { font-family: var(--f-display); font-weight: 600; font-size: 15px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-2); }
+svg { display: block; width: 100%; height: auto; }
+svg text { font-family: var(--f-body); }
+.s-ink { fill: var(--ink); } .s-ink2 { fill: var(--ink-2); } .s-ink3 { fill: var(--ink-3); }
+.s-mono { font-family: var(--f-mono) !important; }
+
+.slider-row { display: grid; gap: 8px; }
+.slider-row label { font-size: 13px; color: var(--ink-2); display: flex; justify-content: space-between; gap: 12px; }
+input[type="range"] { width: 100%; accent-color: var(--amber); height: 28px; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.presets button {
+  font: inherit; font-size: 12.5px; padding: 4px 9px; border-radius: 5px; border: 1px solid var(--rule);
+  background: var(--paper); color: var(--ink-2); cursor: pointer;
+}
+.presets button:hover { border-color: var(--ink-3); color: var(--ink); }
+
+.readout { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 16px; align-items: start; }
+.big { font-family: var(--f-mono); font-weight: 500; font-size: 40px; line-height: 1; letter-spacing: -0.02em; grid-row: span 2; }
+.zone-name { font-family: var(--f-display); font-weight: 700; font-size: 19px; text-transform: uppercase; letter-spacing: 0.04em; }
+.zone-text { font-size: 13.5px; color: var(--ink-2); }
+.facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.fact { border-top: 1px solid var(--rule); padding-top: 8px; font-size: 13px; color: var(--ink-2); min-width: 0; }
+.fact b { display: block; font-family: var(--f-mono); font-weight: 500; font-size: 15px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.fact i { font-style: normal; display: inline-flex; gap: 6px; align-items: center; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; gap: 6px; align-items: center; }
+.sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.sw.steel { background: var(--steel); }
+.sw.plastic { width: 9px; height: 9px; border-radius: 1px; transform: rotate(45deg); border: 2px solid var(--plastic); background: transparent; }
+.sw.base { background: transparent; border: 2px solid var(--ink-2); }
+.note { font-size: 12.5px; color: var(--ink-3); }
+
+details.table-view summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
+.tbl-wrap { overflow-x: auto; margin-top: 8px; max-height: 260px; overflow-y: auto; border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--rule-2); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--ink-3); font-weight: 500; }
+td.num, th.num { text-align: right; font-family: var(--f-mono); }
+
+/* ---------- stage nav ---------- */
+.stagenav {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--paper);
+  border-bottom: 1px solid var(--rule); margin-top: 8px;
+}
+.stagenav .wrap { display: flex; gap: 4px; overflow-x: auto; padding-block: 8px; scrollbar-width: none; }
+.stagenav a {
+  flex: none; text-decoration: none; font-size: 13px; color: var(--ink-2); padding: 6px 10px; border-radius: 6px;
+  display: inline-flex; gap: 6px; align-items: baseline; border: 1px solid transparent;
+}
+.stagenav a .n { font-family: var(--f-mono); font-size: 12px; color: var(--ink-3); }
+.stagenav a:hover { color: var(--ink); }
+.stagenav a.active { border-color: var(--rule); background: var(--panel); color: var(--ink); }
+.stagenav a.active .n { color: var(--amber-ink); }
+
+/* ---------- stages ---------- */
+.stage { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr); padding-block: 34px; border-top: 1px solid var(--rule); scroll-margin-top: 64px; }
+@media (min-width: 960px) { .stage { grid-template-columns: 240px minmax(0, 1fr); gap: 32px; } }
+.stage-label { display: grid; gap: 8px; align-content: start; }
+@media (min-width: 960px) { .stage-label { position: sticky; top: 72px; align-self: start; } }
+.stage-num { font-family: var(--f-mono); font-size: 13px; color: var(--amber-ink); letter-spacing: 0.04em; }
+h3 { font-family: var(--f-display); font-weight: 700; font-size: 28px; line-height: 1.02; text-transform: uppercase; }
+.stage-q { color: var(--ink-2); font-size: 14.5px; }
+.stage-body { display: grid; gap: 16px; min-width: 0; }
+.cards { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 720px) {
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cards > .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+}
+.card {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px;
+  display: grid; gap: 10px; align-content: start; min-width: 0;
+}
+.card header { display: flex; gap: 10px; align-items: center; }
+h4 { font-size: 16px; font-weight: 600; line-height: 1.25; }
+.card .what { color: var(--ink-2); font-size: 14px; }
+.evidence {
+  font-size: 13.5px; background: var(--amber-wash); border-radius: 5px; padding: 8px 10px; color: var(--ink);
+}
+.evidence .lbl {
+  display: block; font-family: var(--f-display); font-weight: 600; font-size: 12px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--amber-ink); margin-bottom: 2px;
+}
+.card details summary { cursor: pointer; font-size: 13px; color: var(--ink-2); list-style: none; display: inline-flex; gap: 6px; align-items: center; }
+.card details summary::-webkit-details-marker { display: none; }
+.card details summary::before { content: "+"; font-family: var(--f-mono); width: 14px; color: var(--ink-3); }
+.card details[open] summary::before { content: "\2212"; }
+.card details p { margin-top: 6px; font-size: 13.5px; color: var(--ink-2); }
+.where { font-size: 12px; color: var(--ink-3); border-top: 1px dashed var(--rule); padding-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+.where code { color: var(--ink-2); }
+
+.notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.notes li {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start;
+  font-size: 13.5px; color: var(--ink-2); padding: 8px 0; border-top: 1px solid var(--rule-2);
+}
+.notes li b { color: var(--ink); font-weight: 600; }
+.notes .why { color: var(--ink-3); }
+body.core-only [data-verdict="optional"], body.core-only [data-verdict="later"] { display: none; }
+
+/* ---------- model chart ---------- */
+.evidence-block { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+.evidence-head { display: flex; flex-wrap: wrap; gap: 10px 16px; justify-content: space-between; align-items: center; }
+.evidence-head h4 { font-size: 16px; }
+.mc-bar { transition: width 380ms ease; }
+.mc-read { font-size: 13.5px; color: var(--ink-2); }
+
+/* ---------- issues & checklist ---------- */
+.issues { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 760px) { .issues { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.issue { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; min-width: 0; }
+.flag {
+  width: 22px; height: 22px; border-radius: 4px; border: 1.5px solid var(--warn); color: var(--warn);
+  display: grid; place-items: center; font-family: var(--f-mono); font-weight: 500; font-size: 13px;
+}
+.issue h4 { font-size: 15px; display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.issue h4 small { font-family: var(--f-display); font-weight: 600; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--warn); }
+.issue p { font-size: 13.5px; color: var(--ink-2); margin-top: 4px; }
+
+.checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 0 28px; grid-template-columns: minmax(0, 1fr); counter-reset: c; }
+@media (min-width: 760px) { .checklist { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.checklist li { counter-increment: c; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 4px; padding: 12px 0; border-top: 1px solid var(--rule); }
+.checklist li::before { content: counter(c, decimal-leading-zero); font-family: var(--f-mono); font-size: 13px; color: var(--amber-ink); padding-top: 2px; }
+.checklist b { display: block; font-weight: 600; }
+.checklist span { font-size: 13.5px; color: var(--ink-2); }
+
+/* ---------- glossary ---------- */
+.glossary { display: grid; gap: 0 28px; grid-template-columns: minmax(0, 1fr); margin: 0; }
+@media (min-width: 760px) { .glossary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.glossary div { padding: 10px 0; border-top: 1px solid var(--rule); scroll-margin-top: 72px; }
+.glossary dt { font-weight: 600; }
+.glossary dd { margin: 2px 0 0; font-size: 13.5px; color: var(--ink-2); }
+.glossary div.flash { background: var(--amber-wash); }
+.term {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: help;
+  text-decoration: underline dotted var(--ink-3); text-underline-offset: 3px;
+}
+#tip {
+  position: fixed; z-index: 50; max-width: 300px; background: var(--tip-bg); color: var(--tip-fg);
+  font-size: 12.5px; line-height: 1.45; padding: 8px 10px; border-radius: 6px; pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+#tip b { display: block; margin-bottom: 2px; }
+
+footer.foot { margin-top: 48px; padding-block: 22px 40px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); }
+footer.foot .wrap { display: grid; gap: 4px; }
+</style>
+</head>
+<body>
+
+<div id="tip" hidden></div>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">ML framework · excavator cooling fans</div>
+    <h1>Fan Shroud ML Guide</h1>
+    <p class="lede">What the framework does with the fan-shroud measurements, which methods it uses at each step, and why some popular methods are left out. Read it before opening <code>fan_ml_framework.ipynb</code>.</p>
+    <div class="datasets" aria-label="Datasets">
+      <span class="ds"><b>Steel shroud</b> 29 runs + baseline <span class="mono">flows, fan power</span></span>
+      <span class="ds"><b>Plastic shroud</b> 22 runs incl. baseline <span class="mono">flows</span></span>
+      <span class="ds"><b>LDR 700</b> 7 runs <span class="mono">1-D appendix</span></span>
+    </div>
+    <div class="keybar">
+      <div class="key" aria-label="Verdict key">
+        <span><span class="tag core">Core</span> used in the framework</span>
+        <span><span class="tag opt">Optional</span> available, not required</span>
+        <span><span class="tag later">Not now</span> needs more or different data</span>
+      </div>
+      <div>
+        <span class="seg-label" id="filter-label">Show</span>
+        <span class="seg" role="group" aria-labelledby="filter-label">
+          <button type="button" id="f-all" aria-pressed="true">Everything</button>
+          <button type="button" id="f-core" aria-pressed="false">Core only</button>
+        </span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- ================= IMMERSION ================= -->
+  <section class="block" id="immersion">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">Key concept</span>
+        <h2>Immersion: the variable that matters most</h2>
+      </div>
+      <div class="explain-grid">
+        <div class="prose">
+          <p>The <strong>shroud</strong> is the duct between the cooler package and the fan. It has three segments: a straight <strong>Box</strong> (P1), a narrowing <strong>Transition</strong> (P2) and a cylindrical <strong>Ring</strong> (P3) that wraps around the fan blades.</p>
+          <p><strong><button type="button" class="term" data-term="immersion">Immersion</button></strong> is the share of the blade's axial depth that sits inside the ring. At 0 the blade is completely outside, at 1 the ring covers its whole depth, above 1 the ring reaches past it. Lengthening any segment pushes the shroud front further over the fan, so immersion is calculated from the depths rather than measured.</p>
+          <div class="formula" aria-label="Immersion formulas">
+            <div><span>steel  </span> Imm = (77.8 + Ring + Trans) / 103.8</div>
+            <div><span>plastic</span> Imm = 1 − (41.522 − (P1 + P2 + P3)) / 76</div>
+            <div><span>all depths in mm; fan depth 103.8 mm (steel), 76 mm (plastic)</span></div>
+          </div>
+        </div>
+        <div class="prose">
+          <p><strong>Why it matters.</strong> With too little ring around the blades, air leaks round the blade tips from the pressure side back to the suction side. With too much, the ring covers the part of the blade where air leaves with an outward component and chokes the outflow. In between lies a sweet spot.</p>
+          <p>Both shrouds in this data deliver the most air near <strong>immersion 0.55–0.6</strong>, consistent with the common rule of thumb of about half to two-thirds immersion. The steel baseline sits at 0.75, past that peak. The explanation above is the usual one in fan engineering; the engineers who ran the tests should confirm it for this machine.</p>
+          <p><strong>Same immersion, different shape.</strong> Immersion says how far the shroud covers the fan, not how that cover is built. Near 0.6, steel shrouds with a long ring and a shortened transition deliver roughly 10–15% less air than balanced ones. That is why the framework adds a second feature, the <em>split</em> (Ring − Transition).</p>
+        </div>
+      </div>
+
+      <div class="explorer" aria-label="Immersion explorer">
+        <div class="pane">
+          <div class="pane-title">Move the shroud front</div>
+          <svg id="diagram" viewBox="0 0 600 300" role="img" aria-label="Half-section of shroud and fan showing how far the ring covers the blade"></svg>
+          <div class="slider-row">
+            <label for="imm">Immersion <span class="mono" id="imm-val">0.60</span></label>
+            <input type="range" id="imm" min="0.10" max="1.25" step="0.01" value="0.60">
+            <div class="presets" aria-label="Jump to">
+              <button type="button" data-v="0.45">Plastic baseline 0.45</button>
+              <button type="button" data-v="0.53">Steel model optimum ≈ 0.53</button>
+              <button type="button" data-v="0.75">Steel baseline 0.75</button>
+              <button type="button" data-v="1.20">Fan buried 1.20</button>
+            </div>
+          </div>
+          <div class="readout" aria-live="polite">
+            <div class="big" id="ro-big">0.60</div>
+            <div class="zone-name" id="ro-zone">Sweet spot</div>
+            <div class="zone-text" id="ro-text"></div>
+          </div>
+          <div class="facts">
+            <div class="fact"><i><span class="sw steel"></span>Steel overlap</i><b id="ro-steel-mm">62 mm</b><span id="ro-steel-near"></span></div>
+            <div class="fact"><i><span class="sw plastic"></span>Plastic overlap</i><b id="ro-plastic-mm">46 mm</b><span id="ro-plastic-near"></span></div>
+          </div>
+        </div>
+        <div class="pane">
+          <div class="pane-title">Measured total flow vs immersion</div>
+          <div class="legend">
+            <span><span class="sw steel"></span>Steel shroud</span>
+            <span><span class="sw plastic"></span>Plastic shroud</span>
+            <span><span class="sw base"></span>Steel baseline</span>
+          </div>
+          <svg id="scatter" viewBox="0 0 520 360" role="img" aria-label="Total flow divided by baseline flow against immersion for both shrouds; both peak near 0.55 to 0.6"></svg>
+          <p class="note">Total flow divided by each shroud's own baseline (steel 2.239 kg/s, plastic 3.802 kg/s). Hover a point for its run.</p>
+          <details class="table-view">
+            <summary>View the runs as a table</summary>
+            <div class="tbl-wrap"><table id="runs-table"><thead><tr><th>Shroud</th><th>Run</th><th class="num">Immersion</th><th class="num">Total flow, kg/s</th><th class="num">vs baseline</th></tr></thead><tbody></tbody></table></div>
+          </details>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PIPELINE ================= -->
+  <section class="block" id="pipeline" style="padding-bottom:0">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">The pipeline</span>
+        <h2>Six steps from spreadsheet to decision</h2>
+        <p>The notebook runs these steps in order on one dataset at a time. Each card says what the method does, what it showed on this data, and where it lives in the notebook (§ section · function in <code>fanml.py</code>).</p>
+      </div>
+    </div>
+    <nav class="stagenav" aria-label="Pipeline steps">
+      <div class="wrap">
+        <a href="#s1"><span class="n">1</span>Check &amp; explore</a>
+        <a href="#s2"><span class="n">2</span>Structure</a>
+        <a href="#s3"><span class="n">3</span>Features</a>
+        <a href="#s4"><span class="n">4</span>Models</a>
+        <a href="#s5"><span class="n">5</span>Validate</a>
+        <a href="#s6"><span class="n">6</span>Predict &amp; decide</a>
+        <a href="#issues"><span class="n">!</span>Known issues</a>
+        <a href="#data"><span class="n">+</span>Better data</a>
+      </div>
+    </nav>
+
+    <div class="wrap">
+      <!-- Stage 1 -->
+      <div class="stage" id="s1">
+        <div class="stage-label">
+          <span class="stage-num">STEP 1 · NOTEBOOK §1–2</span>
+          <h3>Check and explore the data</h3>
+          <p class="stage-q">Is the data sound, and what does it look like?</p>
+        </div>
+        <div class="stage-body">
+          <div class="cards">
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Consistency checks</h4></header>
+              <p class="what">Automatic checks before any modelling: component flows add up to the total, formula columns recalculate, values sit inside the tested ranges.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Found plastic Run 17: total 3.6138 kg/s, but its four components sum to 3.6739 kg/s.</p>
+              <details><summary>How to read it</summary><p>Every finding goes into a data-health report. The raw workbook is never edited; corrections are made in code and logged, so anyone can trace them.</p></details>
+              <div class="where">§1 · <code>validate()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Responses vs immersion</h4></header>
+              <p class="what">Each output plotted against immersion, every point labelled with its run number.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Both shrouds deliver the most air near immersion 0.55–0.6 (explorer above).</p>
+              <details><summary>How to read it</summary><p>Plotting against the physical variable instead of each raw depth shows the pattern at once. Run labels make outliers traceable to the test log.</p></details>
+              <div class="where">§2 · <code>eda_figures()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Correlation and mutual information</h4></header>
+              <p class="what">How strongly an input and an output move together: Pearson (straight line), Spearman (any steady trend), <button type="button" class="term" data-term="mi">mutual information</button> (any dependence, including a peak).</p>
+              <p class="evidence"><span class="lbl">On this data</span>Immersion vs steel total flow: Spearman ρ = −0.89. Steel triangle parameters: |ρ| below 0.2.</p>
+              <details><summary>How to read it</summary><p>Mutual information catches the rise-then-fall shape that correlation misses. With about 25 runs, use it to rank inputs, not as a precise number.</p></details>
+              <div class="where">§2 · <code>eda_figures()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Coverage plot</h4></header>
+              <p class="what">All tested designs drawn in the physics coordinates, with empty regions marked.</p>
+              <p class="evidence"><span class="lbl">On this data</span>No steel runs between immersion 0.37 and 0.56, right where the best design probably sits.</p>
+              <details><summary>How to read it</summary><p>Models are only trustworthy where there is data. The plot shows where predictions are interpolation and where they are guesses, and it tells the next test plan where to go.</p></details>
+              <div class="where">§2 · <code>eda_figures()</code></div>
+            </article>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stage 2 -->
+      <div class="stage" id="s2">
+        <div class="stage-label">
+          <span class="stage-num">STEP 2 · NOTEBOOK §3</span>
+          <h3>Find the structure</h3>
+          <p class="stage-q">How many independent things are going on? Unsupervised methods answer this without a target.</p>
+        </div>
+        <div class="stage-body">
+          <div class="cards">
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>PCA of the outputs</h4></header>
+              <p class="what"><button type="button" class="term" data-term="pca">Principal component analysis</button> finds how many independent patterns hide in the outputs.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Steel: one pattern explains 94% of the variation in all six outputs. Plastic needs about three (62 / 20 / 14%).</p>
+              <details><summary>How to read it</summary><p>One dominant pattern means "more air through everything", and one model is nearly enough. Several patterns mean the split between coolers changes on its own and needs its own model.</p></details>
+              <div class="where">§3 · <code>structure()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Input correlation check</h4></header>
+              <p class="what">PCA and correlations of the inputs check the test plan itself.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Steel Ring and Transition depths correlate at r = −0.60, a side effect of optimiser-driven runs.</p>
+              <details><summary>How to read it</summary><p>When two inputs always change together, no model can tell which one caused an effect. That is a property of the data, and better test planning fixes it.</p></details>
+              <div class="where">§3 · <code>structure()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Flow-split fractions</h4></header>
+              <p class="what">Each cooler's share of the total air flow, plotted against the design variables.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Steel: the charge-air cooler's share drops from 17% to 3.5% at high immersion. Plastic: total flow moves 13%, CAC flow twofold.</p>
+              <details><summary>How to read it</summary><p>A design can raise total flow and still starve one cooler. Fractions make that visible and become a constraint in the optimisation step.</p></details>
+              <div class="where">§3 · <code>structure()</code></div>
+            </article>
+          </div>
+          <ul class="notes">
+            <li data-verdict="optional"><span class="tag opt">Optional</span><span><b>Clustering (k-means, Gaussian mixtures).</b> Offers named operating regimes. <span class="why">Why not core: with 29 runs a small decision tree on immersion finds the same thresholds and is easier to explain.</span></span></li>
+            <li data-verdict="later"><span class="tag later">Not now</span><span><b>t-SNE and UMAP.</b> Offer 2-D maps of many-dimensional data. <span class="why">Why not: the inputs have only 2–4 dimensions and can be plotted directly.</span></span></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Stage 3 -->
+      <div class="stage" id="s3">
+        <div class="stage-label">
+          <span class="stage-num">STEP 3 · NOTEBOOK §4</span>
+          <h3>Build physics features</h3>
+          <p class="stage-q">Which variables should the model see? Physics-based inputs beat raw ones when data is scarce.</p>
+        </div>
+        <div class="stage-body">
+          <div class="cards">
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Physics coordinates</h4></header>
+              <p class="what">Describe the shroud by immersion (how far it covers the fan) and split (Ring − Transition, how that cover is built) instead of raw segment depths.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Predicting later steel runs: error 0.15 → 0.10 kg/s. Random forest <button type="button" class="term" data-term="q2">Q²</button> 0.56 → 0.88.</p>
+              <details><summary>How to read it</summary><p>Immersion is the sum of the depths, so it can't sit next to all of them in one model. Switching to immersion + split removes that overlap and matches how the flow responds.</p></details>
+              <div class="where">§4 · <code>add_features()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Total plus fractions</h4></header>
+              <p class="what">Model the total flow and each cooler's share instead of four separate flows.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Guarantees that predicted cooler flows add up to the predicted total.</p>
+              <details><summary>How to read it</summary><p>Four independent models can predict components that don't sum to the total, which is physically impossible. Shares are log-ratio transformed so they also stay between 0 and 1.</p></details>
+              <div class="where">§4 · <code>add_features()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Baseline normalisation</h4></header>
+              <p class="what">Express each output relative to its shroud's baseline.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Puts both shrouds on one scale: both peak near immersion 0.55–0.6.</p>
+              <details><summary>How to read it</summary><p>Normalised values compare designs across shrouds. Full fan-law scaling needs fan speed and pressure rise, which the workbook doesn't contain yet.</p></details>
+              <div class="where">§4 · <code>add_features()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Relevance-based selection</h4></header>
+              <p class="what">Drop inputs that carry no signal, judged by the Gaussian process's <button type="button" class="term" data-term="ard">relevance weights</button>, Sobol indices and mutual information together.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Steel triangles show no detectable effect on flow or power in the tested range.</p>
+              <details><summary>How to read it</summary><p>Fewer inputs give more stable models when runs are few. "No detectable effect" can also mean the tested range was too narrow, so ask the engineers before dropping a parameter for good.</p></details>
+              <div class="where">§4, §7 · <code>explain()</code></div>
+            </article>
+          </div>
+          <ul class="notes">
+            <li data-verdict="later"><span class="tag later">Not now</span><span><b>Fan-law coefficients (flow, pressure, power).</b> Offer pooling across fans, speeds and machines. <span class="why">Why not: needs fan speed and pressure rise for every run.</span></span></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Stage 4 -->
+      <div class="stage" id="s4">
+        <div class="stage-label">
+          <span class="stage-num">STEP 4 · NOTEBOOK §5</span>
+          <h3>Choose models</h3>
+          <p class="stage-q">Which model fits this kind of data? Start simple; add flexibility only when validation pays for it.</p>
+        </div>
+        <div class="stage-body">
+          <div class="cards">
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Quadratic response surface</h4></header>
+              <p class="what">A smooth second-order formula in the inputs, the classic <button type="button" class="term" data-term="rsm">response surface</button> of designed experiments. Ridge regularisation and AIC/BIC keep only the terms the data supports.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Best on plastic: Q² 0.92 for total flow, 0.96 for CAC flow.</p>
+              <details><summary>How to read it</summary><p>Coefficients read directly as effects and interactions. Its fixed bowl shape can't follow a plateau, peak and drop, which is why it loses on steel.</p></details>
+              <div class="where">§5 · <code>model_zoo()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Gaussian process (Kriging)</h4></header>
+              <p class="what">A flexible, smooth interpolator that returns an uncertainty with every prediction and learns how relevant each input is.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Best on steel: Q² 0.98 for total flow (error 0.06 kg/s), 0.96 for fan power.</p>
+              <details><summary>How to read it</summary><p>Its uncertainty drives the next-run recommender. With few runs the fit is fragile (it failed on plastic with default settings), so the framework uses several restarts, sensible bounds and a trend term. Outside the data it falls back to the average; never trust it there.</p></details>
+              <div class="where">§5 · <code>model_zoo()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Linear model</h4></header>
+              <p class="what">A straight-line fit, kept as the reference every other model has to beat.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Steel total flow Q² 0.67; plastic total flow below 0.</p>
+              <details><summary>How to read it</summary><p>If a complex model barely beats the linear one, the extra complexity isn't paying off.</p></details>
+              <div class="where">§5 · <code>model_zoo()</code></div>
+            </article>
+          </div>
+
+          <div class="evidence-block">
+            <div class="evidence-head">
+              <h4>No single model wins: it depends on the dataset</h4>
+              <span class="seg" role="group" aria-label="Inputs given to the models">
+                <button type="button" id="mc-phys" aria-pressed="true">Physics features</button>
+                <button type="button" id="mc-raw" aria-pressed="false">Raw depths</button>
+              </span>
+            </div>
+            <svg id="modelchart" viewBox="0 0 560 505" role="img" aria-label="Leave-one-out Q squared of four models on four outputs"></svg>
+            <p class="mc-read" id="mc-read"></p>
+            <p class="note">Leave-one-out <button type="button" class="term" data-term="q2">Q²</button>; best model per output in amber. Physics features: immersion + split (steel), immersion + Box + Ring (plastic). Plastic total uses Run 17 as recorded.</p>
+          </div>
+
+          <ul class="notes">
+            <li data-verdict="optional"><span class="tag opt">Optional</span><span><b>Random forest.</b> Offers a robust fit with no tuning. <span class="why">Why only as a contrast: step-shaped predictions, no extrapolation, weak below about 30 runs.</span></span></li>
+            <li data-verdict="optional"><span class="tag opt">Optional</span><span><b>Symbolic regression.</b> Offers a closed-form formula engineers can use in a spreadsheet. <span class="why">Why optional: unstable with little data; a bonus check, not the main model.</span></span></li>
+            <li data-verdict="later"><span class="tag later">Not now</span><span><b>Neural networks and physics-informed networks.</b> Offer very flexible fits. <span class="why">Why not: they overfit 29 runs; viable with hundreds of CFD runs.</span></span></li>
+            <li data-verdict="later"><span class="tag later">Not now</span><span><b>Combining CFD and tests (multi-fidelity co-kriging).</b> Offers many cheap simulations corrected by a few tests. <span class="why">Why not: needs runs labelled by source from both.</span></span></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Stage 5 -->
+      <div class="stage" id="s5">
+        <div class="stage-label">
+          <span class="stage-num">STEP 5 · NOTEBOOK §6</span>
+          <h3>Validate honestly</h3>
+          <p class="stage-q">How good are the predictions on designs the model has never seen?</p>
+        </div>
+        <div class="stage-body">
+          <div class="cards">
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Leave-one-out and nested cross-validation</h4></header>
+              <p class="what">Each run is predicted by a model trained on all the others (<button type="button" class="term" data-term="loo">leave-one-out</button>). <button type="button" class="term" data-term="nested">Nested</button> means the model choice is also made inside the loop.</p>
+              <p class="evidence"><span class="lbl">On this data</span>All Q² values in this guide come from leave-one-out. Without nesting they are slightly optimistic.</p>
+              <details><summary>How to read it</summary><p>With 7–29 runs there is no room for a separate test set; leave-one-out uses every run for testing once. Nesting stops the score from flattering whichever model happened to win.</p></details>
+              <div class="where">§6 · <code>cross_validate()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Later-runs test</h4></header>
+              <p class="what">Train on the earlier runs and predict the later ones, the way the model will be used in practice.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Steel Runs 21–29 predicted with 0.10 kg/s <button type="button" class="term" data-term="rmse">RMSE</button>; plastic Runs 16–21 within about 1%, except Run 17.</p>
+              <details><summary>How to read it</summary><p>Later runs often explore new regions. This test shows how the model copes with designs unlike its training data.</p></details>
+              <div class="where">§6 · <code>cross_validate()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Parity and residual plots</h4></header>
+              <p class="what">Predicted vs measured values, and the errors plotted against each input.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Plastic Run 17 stands out as the largest error (0.073 kg/s); its component sum fits the model.</p>
+              <details><summary>How to read it</summary><p>A pattern in the errors means missing physics. A single large error often means a data problem rather than a model problem.</p></details>
+              <div class="where">§6 · <code>diagnostics()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Uncertainty check</h4></header>
+              <p class="what">Count how many measured runs fall inside the model's 95% bands.</p>
+              <p class="evidence"><span class="lbl">On this data</span>The steel baseline, never used in training, is predicted at 2.22 ± 0.03 kg/s; measured 2.239 kg/s.</p>
+              <details><summary>How to read it</summary><p>If far fewer than 95% of runs land inside the bands, the bands are too narrow and the next-run recommender will be overconfident.</p></details>
+              <div class="where">§6 · <code>diagnostics()</code></div>
+            </article>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stage 6 -->
+      <div class="stage" id="s6">
+        <div class="stage-label">
+          <span class="stage-num">STEP 6 · NOTEBOOK §7–9</span>
+          <h3>Predict, explain, decide</h3>
+          <p class="stage-q">What should we build, and what should we measure next?</p>
+        </div>
+        <div class="stage-body">
+          <div class="cards">
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>What-if predictor</h4></header>
+              <p class="what">Enter any geometry; get every cooler flow and the fan power with an uncertainty, plus a warning outside the tested range.</p>
+              <p class="evidence"><span class="lbl">On this data</span>The tool that can replace some of the costly test runs.</p>
+              <details><summary>How to read it</summary><p>The out-of-range warning is not optional. With 22–29 runs the model is reliable only inside the region the tests covered.</p></details>
+              <div class="where">§8 · <code>predict()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Response maps</h4></header>
+              <p class="what">1-D curves and 2-D contour maps (immersion × split) with the measured runs overlaid and the uncertainty shaded.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Shows why ring-heavy steel shrouds lose roughly 10–15% flow at the same immersion.</p>
+              <details><summary>How to read it</summary><p>Engineers read maps faster than tables. The shading shows where the map is backed by data and where it is a guess.</p></details>
+              <div class="where">§7 · <code>explain()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Global sensitivity</h4></header>
+              <p class="what"><button type="button" class="term" data-term="sobol">Sobol indices</button> split an output's variation into shares caused by each input and their interactions.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Expected steel ranking: immersion first, split second, triangles near zero.</p>
+              <details><summary>How to read it</summary><p>It runs on the fitted model, not on new measurements, so it costs nothing extra. It answers "which parameter is worth changing?"</p></details>
+              <div class="where">§7 · <code>explain()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Constrained optimisation and trade-offs</h4></header>
+              <p class="what">Search the model for the best geometry within packaging limits and cooler minimums, and show the flow-vs-power <button type="button" class="term" data-term="pareto">trade-off</button>.</p>
+              <p class="evidence"><span class="lbl">On this data</span>Steel model optimum near immersion 0.52–0.54, against a baseline of 0.75. It lies in the untested gap: measure before trusting it.</p>
+              <details><summary>How to read it</summary><p>The objective has to come from the engineers: maximum total flow, flow per kW, or a minimum flow for each cooler.</p></details>
+              <div class="where">§9 · <code>optimise()</code></div>
+            </article>
+            <article class="card" data-verdict="core">
+              <header><span class="tag core">Core</span><h4>Next-run recommender</h4></header>
+              <p class="what">Bayesian optimisation proposes the 3–5 runs that would teach the model most or most likely improve the design.</p>
+              <p class="evidence"><span class="lbl">On this data</span>For steel, the first proposals will fall in the immersion gap 0.37–0.56.</p>
+              <details><summary>How to read it</summary><p>It uses the Gaussian process's uncertainty (<button type="button" class="term" data-term="ei">expected improvement</button>). This is the direct answer to "measurements are costly".</p></details>
+              <div class="where">§9 · <code>suggest_next()</code></div>
+            </article>
+          </div>
+          <ul class="notes">
+            <li data-verdict="optional"><span class="tag opt">Optional</span><span><b>Interactive sliders in the notebook.</b> Offer quick what-if exploration in meetings. <span class="why">Why optional: a convenience; the <code>predict()</code> table does the same.</span></span></li>
+            <li data-verdict="later"><span class="tag later">Not now</span><span><b>Flow-field surrogates (POD + Gaussian process).</b> Predict whole velocity and pressure fields at the fan plane. <span class="why">Why not: needs exported CFD fields.</span></span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ISSUES ================= -->
+  <section class="block" id="issues">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">Read before trusting numbers</span>
+        <h2>Known issues in this dataset</h2>
+        <p>Found by the automated checks. None blocks the analysis; each stays flagged in every output until the engineers who produced the data answer.</p>
+      </div>
+      <div class="issues">
+        <div class="issue"><span class="flag" aria-hidden="true">!</span><div><h4>Run 17 total doesn't match its components <small>Open</small></h4><p>Plastic shroud. The recorded total is 3.6138 kg/s; the four components sum to 3.6739 kg/s. Probably a typo, not yet confirmed. The notebook keeps the recorded value and runs a corrected variant as a check.</p></div></div>
+        <div class="issue"><span class="flag" aria-hidden="true">!</span><div><h4>Measurement, simulation, or both? <small>Open</small></h4><p>Plastic Runs 1–15 carry 13+ digits and add up exactly; Runs 0 and 16–21 are rounded. The data may mix simulation and measurement. Until this is clarified, the model learns the noise level from the data.</p></div></div>
+        <div class="issue"><span class="flag" aria-hidden="true">!</span><div><h4>Runs chosen by an optimiser <small>Handled</small></h4><p>Inputs are correlated (steel Ring vs Transition r = −0.60) and steel has a gap at immersion 0.37–0.56. Physics features and the next-run recommender deal with both.</p></div></div>
+        <div class="issue"><span class="flag" aria-hidden="true">!</span><div><h4>Parameters without definitions <small>Open</small></h4><p>LDR 700 "Parameter 1" has no name or unit. The steel triangle parameters and the steel baseline geometry are not specified. The questions are listed in the build proposal.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= BETTER DATA ================= -->
+  <section class="block" id="data">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">Garbage in, garbage out</span>
+        <h2>Better data, better models</h2>
+        <p>Model quality is capped by the data. These eight habits make the next test or simulation campaign ready for ML.</p>
+      </div>
+      <ol class="checklist">
+        <li><div><b>Record the operating point</b><span>Fan speed, air temperature and density, pressure rise and fan power for every run. Without them results can't be scaled to another fan or speed.</span></div></li>
+        <li><div><b>Label the source of every number</b><span>Test bench or CFD, with rig or solver version and date. Mixed sources are fine; unlabelled ones are not.</span></div></li>
+        <li><div><b>Plan in physics coordinates</b><span>Spread runs evenly over immersion and split (Latin hypercube or Sobol sequence). About 10 runs per input is a good start.</span></div></li>
+        <li><div><b>Add runs in small batches</b><span>3–5 at a time, chosen by the model where it is most uncertain or most promising.</span></div></li>
+        <li><div><b>Repeat the baseline</b><span>3–5 times across the campaign. Without it nobody can say whether a 0.5% difference is real.</span></div></li>
+        <li><div><b>Pair optimiser runs with an even base set</b><span>Optimiser runs alone produce correlated inputs and gaps, as in this data.</span></div></li>
+        <li><div><b>Keep one row per run</b><span>Units in the header, no merged cells, totals and immersion calculated in code instead of typed.</span></div></li>
+        <li><div><b>State the goal and the limits</b><span>Minimum flow per cooler and packaging bounds for each depth, so the optimiser proposes only feasible designs.</span></div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ================= GLOSSARY ================= -->
+  <section class="block" id="glossary">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">Reference</span>
+        <h2>Glossary</h2>
+        <p>Dotted terms in the text open these definitions on hover or tap.</p>
+      </div>
+      <dl class="glossary" id="glossary-list"></dl>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div>Companion to <code>fan_ml_framework.ipynb</code> and <code>fanml.py</code>. Numbers from <code>Data_for_ML_training.xlsx</code>, first analysis of 14 October 2026.</div>
+    <div>Data origin (measurement or simulation) and plastic Run 17 are unconfirmed; see Known issues.</div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs, parent) {
+    var n = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k)) n.setAttribute(k, attrs[k]); }
+    if (parent) parent.appendChild(n);
+    return n;
+  }
+  function txt(parent, x, y, s, cls, extra) {
+    var t = el("text", Object.assign({ x: x, y: y, "class": cls || "s-ink2" }, extra || {}), parent);
+    t.textContent = s;
+    return t;
+  }
+  function fmt(v, d) { return v.toFixed(d === undefined ? 2 : d); }
+
+  /* ---------------- data ---------------- */
+  var STEEL_BASE = 2.239, PLASTIC_BASE = 3.8019;
+  var STEEL = [[17,0.319,2.245],[16,0.325,2.254],[11,0.338,2.285],[7,0.347,2.239],[28,0.362,2.322],[8,0.372,2.289],
+    [21,0.563,2.199],[25,0.592,2.467],[9,0.600,2.432],[3,0.633,2.119],[23,0.644,2.079],[15,0.752,1.904],[24,0.757,2.157],
+    [26,0.793,1.921],[27,0.831,1.950],[13,0.837,1.665],[29,0.838,1.993],[20,0.840,2.120],[22,0.864,2.052],[6,0.920,1.914],
+    [12,0.975,1.858],[4,0.994,1.507],[18,1.052,1.524],[5,1.057,1.120],[14,1.091,1.582],[2,1.151,1.029],[10,1.159,1.479],
+    [1,1.209,0.941],[19,1.231,1.545]];
+  var PLASTIC = [[1,0.144,3.5184],[8,0.344,3.7273],[0,0.454,3.8019],[16,0.484,3.808],[2,0.530,3.7698],[20,0.567,3.8206],
+    [19,0.576,3.8204],[21,0.596,3.8366],[7,0.610,3.6896],[18,0.693,3.7607],[12,0.720,3.6424],[14,0.722,3.7511],
+    [9,0.733,3.7999],[6,0.766,3.6840],[10,0.774,3.7800],[11,0.821,3.6115],[13,0.852,3.4497],[17,0.880,3.6138],
+    [3,0.900,3.6246],[4,0.947,3.5797],[5,1.035,3.3196],[15,1.047,3.4699]];
+
+  var GLOSSARY = [
+    ["immersion", "Immersion", "Share of the fan blade's axial depth that sits inside the shroud ring. 0 = fully outside, 1 = fully covered."],
+    ["q2", "Q²", "The R² of predictions on runs the model did not see. 1 = perfect, 0 = no better than predicting the average, below 0 = worse than that."],
+    ["loo", "Leave-one-out (LOO)", "Predict each run with a model trained on all the other runs, then score all those predictions together."],
+    ["nested", "Nested cross-validation", "Model choice and tuning are repeated inside every validation fold, so the score is not flattered by the selection."],
+    ["rmse", "RMSE", "Root-mean-square error: the typical prediction error, in the output's own unit (kg/s, kW)."],
+    ["gp", "Gaussian process (Kriging)", "A smooth interpolating model that gives an uncertainty with each prediction. Standard for expensive experiments."],
+    ["ard", "Relevance weights (ARD)", "A Gaussian-process setting that learns one length scale per input. A very long scale means the input barely matters."],
+    ["rsm", "Response surface", "A polynomial, here quadratic, fitted to designed experiments. Its coefficients read as effects and interactions."],
+    ["pca", "PCA", "Principal component analysis: finds the few combined directions that carry most of the variation in a set of variables."],
+    ["mi", "Mutual information", "How much knowing one variable reduces uncertainty about another. Catches non-linear links such as a peak."],
+    ["sobol", "Sobol index", "The share of an output's variance caused by one input, alone or together with others."],
+    ["ei", "Expected improvement", "How much better than the best design so far a new run is expected to be. Used to choose the next run."],
+    ["pareto", "Trade-off (Pareto front)", "The set of designs where no objective can improve without another getting worse, for example air flow vs fan power."],
+    ["physics", "Physics features", "Inputs built from physical reasoning, such as immersion, split and flow fractions, instead of the raw columns of the sheet."]
+  ];
+  var GMAP = {};
+  GLOSSARY.forEach(function (g) { GMAP[g[0]] = g; });
+
+  /* ---------------- immersion explorer ---------------- */
+  var diag = document.getElementById("diagram");
+  var FAN_X = 360, FAN_W = 110, RING_Y = 104;
+  var dyn = {};
+  (function buildDiagram() {
+    // coolers + reference plane
+    el("rect", { x: 14, y: 56, width: 24, height: 196, rx: 3, fill: "var(--rule)", stroke: "var(--ink-3)", "stroke-width": 1 }, diag);
+    txt(diag, 0, 0, "cooler package", "s-ink3", { transform: "translate(30 236) rotate(-90)", "font-size": 11.5 });
+    el("line", { x1: 40, y1: 40, x2: 40, y2: 284, stroke: "var(--ink-3)", "stroke-width": 1, "stroke-dasharray": "10 3 2 3" }, diag);
+    // axis of rotation
+    el("line", { x1: 40, y1: 280, x2: 590, y2: 280, stroke: "var(--ink-3)", "stroke-width": 1, "stroke-dasharray": "10 3 2 3" }, diag);
+    txt(diag, 588, 274, "fan axis", "s-ink3", { "text-anchor": "end", "font-size": 11.5 });
+    // fan blade + hub
+    el("rect", { x: FAN_X, y: 112, width: FAN_W, height: 120, rx: 16, fill: "var(--blade)", stroke: "var(--ink-2)", "stroke-width": 1.25 }, diag);
+    el("rect", { x: 474, y: 236, width: 40, height: 40, rx: 6, fill: "var(--blade)", stroke: "var(--ink-2)", "stroke-width": 1.25 }, diag);
+    txt(diag, 494, 261, "hub", "s-ink2", { "text-anchor": "middle", "font-size": 11.5 });
+    // overlap shading (dynamic)
+    dyn.ov = el("rect", { x: FAN_X, y: 108, width: 50, height: 128, fill: "var(--amber-wash)", stroke: "var(--amber)", "stroke-width": 1.5, "stroke-dasharray": "4 3" }, diag);
+    txt(diag, FAN_X + FAN_W / 2, 178, "fan blade", "s-ink", { "text-anchor": "middle", "font-size": 13, "font-weight": 600 });
+    // shroud wall (dynamic ring end)
+    dyn.wall = el("polyline", { points: "", fill: "none", stroke: "var(--ink)", "stroke-width": 5, "stroke-linejoin": "round", "stroke-linecap": "round" }, diag);
+    // shroud front marker
+    dyn.front = el("line", { x1: 0, y1: 36, x2: 0, y2: 240, stroke: "var(--amber-ink)", "stroke-width": 1.25, "stroke-dasharray": "3 3" }, diag);
+    dyn.frontLbl = txt(diag, 0, 54, "shroud front", "s-ink2", { "text-anchor": "start", "font-size": 13 });
+    // top dimensions
+    function dimLine(x1, x2, y) {
+      var g = el("g", {}, diag);
+      el("line", { x1: x1, y1: y, x2: x2, y2: y, stroke: "var(--ink-3)", "stroke-width": 1 }, g);
+      el("line", { x1: x1, y1: y - 5, x2: x1, y2: y + 5, stroke: "var(--ink-3)", "stroke-width": 1 }, g);
+      el("line", { x1: x2, y1: y - 5, x2: x2, y2: y + 5, stroke: "var(--ink-3)", "stroke-width": 1 }, g);
+      return g;
+    }
+    dimLine(40, 190, 30); txt(diag, 115, 21, "Box (P1)", "s-ink2", { "text-anchor": "middle", "font-size": 14 });
+    dimLine(190, 290, 30); txt(diag, 240, 21, "Transition (P2)", "s-ink2", { "text-anchor": "middle", "font-size": 14 });
+    dyn.p3 = dimLine(290, 400, 30);
+    dyn.p3Lbl = txt(diag, 345, 21, "Ring (P3)", "s-ink2", { "text-anchor": "middle", "font-size": 14 });
+    // overlap dimension (dynamic) and fan depth dimension
+    dyn.ovDim = el("g", {}, diag);
+    dimLine(FAN_X, FAN_X + FAN_W, 248);
+    txt(diag, FAN_X + FAN_W / 2 - 6, 266, "fan depth", "s-ink2", { "text-anchor": "middle", "font-size": 13 });
+    dyn.ovLbl = txt(diag, 0, 92, "overlap", "s-ink", { "text-anchor": "middle", "font-size": 13, "font-weight": 600 });
+  })();
+
+  function zoneFor(v) {
+    if (v < 0.40) return ["Mostly outside", "Little of the blade is inside the ring. Air can leak round the blade tips. Measured flow is at or below baseline (plastic −7.5% at 0.14)."];
+    if (v <= 0.70) return ["Sweet spot", "Part of the blade sits inside the ring. Both shrouds deliver their highest measured flow here (steel up to +10%, plastic up to +1%)."];
+    if (v <= 0.90) return ["Past the peak", "Flow starts to fall. The steel baseline (0.75) sits here. Spread between runs grows: the shroud shape (split) matters more."];
+    return ["Fan buried", "The ring covers most or all of the blade and chokes the outflow. Steel flow falls by up to 58%."];
+  }
+  function nearText(data, base, v) {
+    var near = data.filter(function (d) { return Math.abs(d[1] - v) <= 0.05; });
+    if (!near.length) return "No measured runs within ±0.05";
+    var r = near.map(function (d) { return d[2] / base; });
+    var lo = Math.min.apply(null, r), hi = Math.max.apply(null, r);
+    var span = (Math.abs(hi - lo) < 0.005) ? fmt(lo) + "×" : fmt(lo) + "–" + fmt(hi) + "×";
+    return near.length + (near.length === 1 ? " run" : " runs") + " within ±0.05: " + span + " baseline";
+  }
+
+  /* scatter */
+  var sc = document.getElementById("scatter");
+  var SC = { l: 46, r: 14, t: 40, b: 42, w: 520, h: 360, x0: 0, x1: 1.3, y0: 0.4, y1: 1.15 };
+  function sx(v) { return SC.l + (v - SC.x0) / (SC.x1 - SC.x0) * (SC.w - SC.l - SC.r); }
+  function sy(v) { return SC.h - SC.b - (v - SC.y0) / (SC.y1 - SC.y0) * (SC.h - SC.t - SC.b); }
+  var tip = document.getElementById("tip");
+  function showTip(html, x, y) {
+    tip.innerHTML = html; tip.hidden = false;
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    var px = Math.min(window.innerWidth - w - 8, Math.max(8, x + 12));
+    var py = (y - h - 12 < 8) ? y + 16 : y - h - 12;
+    tip.style.left = px + "px"; tip.style.top = py + "px";
+  }
+  function hideTip() { tip.hidden = true; }
+
+  (function buildScatter() {
+    // zone bands
+    var zones = [[0, 0.40, "mostly outside", false], [0.45, 0.70, "sweet spot", true], [0.90, 1.3, "fan buried", false]];
+    zones.forEach(function (z) {
+      el("rect", { x: sx(z[0]), y: SC.t, width: sx(z[1]) - sx(z[0]), height: SC.h - SC.t - SC.b,
+        fill: z[3] ? "var(--amber-wash)" : "var(--rule-2)", opacity: z[3] ? 1 : 0.6 }, sc);
+      txt(sc, (sx(z[0]) + sx(z[1])) / 2, SC.t - 8, z[2], z[3] ? "s-ink" : "s-ink3", { "text-anchor": "middle", "font-size": 11.5, "font-weight": z[3] ? 600 : 400 });
+    });
+    // grid + axes
+    [0.4, 0.6, 0.8, 1.0].forEach(function (v) {
+      el("line", { x1: SC.l, x2: SC.w - SC.r, y1: sy(v), y2: sy(v), stroke: "var(--rule)", "stroke-width": 1 }, sc);
+      txt(sc, SC.l - 8, sy(v) + 4, fmt(v, 1) + "×", "s-ink3 s-mono", { "text-anchor": "end", "font-size": 11 });
+    });
+    [0, 0.25, 0.5, 0.75, 1.0, 1.25].forEach(function (v) {
+      el("line", { x1: sx(v), x2: sx(v), y1: SC.h - SC.b, y2: SC.h - SC.b + 4, stroke: "var(--ink-3)", "stroke-width": 1 }, sc);
+      txt(sc, sx(v), SC.h - SC.b + 17, fmt(v), "s-ink3 s-mono", { "text-anchor": "middle", "font-size": 11 });
+    });
+    el("line", { x1: SC.l, x2: SC.w - SC.r, y1: SC.h - SC.b, y2: SC.h - SC.b, stroke: "var(--ink-3)", "stroke-width": 1 }, sc);
+    txt(sc, (SC.l + SC.w - SC.r) / 2, SC.h - 6, "immersion", "s-ink2", { "text-anchor": "middle", "font-size": 12 });
+    // baseline reference
+    el("line", { x1: SC.l, x2: SC.w - SC.r, y1: sy(1), y2: sy(1), stroke: "var(--ink-3)", "stroke-width": 1, "stroke-dasharray": "5 4" }, sc);
+    txt(sc, SC.w - SC.r - 2, sy(1) + 14, "baseline flow", "s-ink3", { "text-anchor": "end", "font-size": 11 });
+    // cursor
+    dyn.cur = el("line", { x1: 0, x2: 0, y1: SC.t, y2: SC.h - SC.b, stroke: "var(--amber)", "stroke-width": 2 }, sc);
+
+    function addPoint(kind, d) {
+      var base = kind === "steel" ? STEEL_BASE : PLASTIC_BASE;
+      var x = sx(d[1]), y = sy(d[2] / base), g = el("g", {}, sc);
+      if (kind === "steel") {
+        el("circle", { cx: x, cy: y, r: 4.6, fill: "var(--steel)", stroke: "var(--panel)", "stroke-width": 1.5 }, g);
+      } else {
+        el("path", { d: "M" + x + " " + (y - 5.5) + "L" + (x + 5.5) + " " + y + "L" + x + " " + (y + 5.5) + "L" + (x - 5.5) + " " + y + "Z",
+          fill: "var(--panel)", stroke: "var(--plastic)", "stroke-width": 2 }, g);
+      }
+      var hit = el("circle", { cx: x, cy: y, r: 10, fill: "transparent" }, g);
+      var name = kind === "steel" ? "Steel" : "Plastic";
+      var flag = (kind === "plastic" && d[0] === 17) ? "<br>Flagged: total ≠ sum of components" : "";
+      var label = (kind === "plastic" && d[0] === 0) ? "Run 0 (baseline)" : "Run " + d[0];
+      var html = "<b>" + name + " · " + label + "</b>Immersion " + fmt(d[1]) + " · " + fmt(d[2], 3) + " kg/s · " + fmt(d[2] / base) + "× baseline" + flag;
+      hit.addEventListener("pointerenter", function (e) { showTip(html, e.clientX, e.clientY); });
+      hit.addEventListener("pointermove", function (e) { showTip(html, e.clientX, e.clientY); });
+      hit.addEventListener("pointerleave", hideTip);
+    }
+    PLASTIC.forEach(function (d) { addPoint("plastic", d); });
+    STEEL.forEach(function (d) { addPoint("steel", d); });
+    // steel baseline
+    var bx = sx(77.8 / 103.8), by = sy(1);
+    el("circle", { cx: bx, cy: by, r: 5.5, fill: "var(--panel)", stroke: "var(--ink-2)", "stroke-width": 2 }, sc);
+    var bh = el("circle", { cx: bx, cy: by, r: 10, fill: "transparent" }, sc);
+    var bhtml = "<b>Steel baseline</b>Immersion 0.75 · 2.239 kg/s · 6.41 kW";
+    bh.addEventListener("pointerenter", function (e) { showTip(bhtml, e.clientX, e.clientY); });
+    bh.addEventListener("pointerleave", hideTip);
+    // direct labels on the few points the story rests on
+    txt(sc, sx(0.592) + 8, sy(2.467 / STEEL_BASE) - 6, "steel peak, Run 25", "s-ink2", { "font-size": 11 });
+    txt(sc, sx(1.209) - 6, sy(0.941 / STEEL_BASE) + 4, "Run 1, −58%", "s-ink2", { "font-size": 11, "text-anchor": "end" });
+  })();
+
+  /* table view */
+  (function buildTable() {
+    var rows = [];
+    STEEL.forEach(function (d) { rows.push(["Steel", "Run " + d[0], d[1], d[2], d[2] / STEEL_BASE]); });
+    rows.push(["Steel", "Baseline", 77.8 / 103.8, STEEL_BASE, 1]);
+    PLASTIC.forEach(function (d) { rows.push(["Plastic", d[0] === 0 ? "Run 0 (baseline)" : "Run " + d[0] + (d[0] === 17 ? " (flagged)" : ""), d[1], d[2], d[2] / PLASTIC_BASE]); });
+    var tb = document.querySelector("#runs-table tbody");
+    rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + r[0] + "</td><td>" + r[1] + "</td><td class='num'>" + fmt(r[2]) + "</td><td class='num'>" + fmt(r[3], 3) + "</td><td class='num'>" + fmt(r[4]) + "×</td>";
+      tb.appendChild(tr);
+    });
+  })();
+
+  var slider = document.getElementById("imm");
+  function updateImm() {
+    var v = parseFloat(slider.value);
+    var ringEnd = FAN_X + v * FAN_W;
+    dyn.wall.setAttribute("points", "40,56 190,56 290," + RING_Y + " " + ringEnd + "," + RING_Y);
+    var ovW = Math.max(0, Math.min(1, v)) * FAN_W;
+    dyn.ov.setAttribute("width", ovW);
+    dyn.front.setAttribute("x1", ringEnd); dyn.front.setAttribute("x2", ringEnd);
+    dyn.frontLbl.setAttribute("x", Math.min(ringEnd + 6, 512));
+    // P3 dimension
+    var p3 = dyn.p3.querySelectorAll("line");
+    p3[0].setAttribute("x2", ringEnd); p3[2].setAttribute("x1", ringEnd); p3[2].setAttribute("x2", ringEnd);
+    dyn.p3Lbl.setAttribute("x", (290 + ringEnd) / 2);
+    // overlap dim
+    while (dyn.ovDim.firstChild) dyn.ovDim.removeChild(dyn.ovDim.firstChild);
+    if (ovW > 2) {
+      el("line", { x1: FAN_X, y1: 86, x2: FAN_X + ovW, y2: 86, stroke: "var(--amber-ink)", "stroke-width": 1.25 }, dyn.ovDim);
+      el("line", { x1: FAN_X, y1: 81, x2: FAN_X, y2: 91, stroke: "var(--amber-ink)", "stroke-width": 1.25 }, dyn.ovDim);
+      el("line", { x1: FAN_X + ovW, y1: 81, x2: FAN_X + ovW, y2: 91, stroke: "var(--amber-ink)", "stroke-width": 1.25 }, dyn.ovDim);
+    }
+    dyn.ovLbl.setAttribute("x", FAN_X + Math.max(ovW, 60) / 2);
+    dyn.ovLbl.setAttribute("y", 76);
+    dyn.ovLbl.textContent = "overlap " + Math.round(Math.min(1, v) * 100) + "%";
+    // scatter cursor
+    var cx = sx(v);
+    dyn.cur.setAttribute("x1", cx); dyn.cur.setAttribute("x2", cx);
+    // readout
+    var z = zoneFor(v);
+    document.getElementById("imm-val").textContent = fmt(v);
+    document.getElementById("ro-big").textContent = fmt(v);
+    document.getElementById("ro-zone").textContent = z[0];
+    document.getElementById("ro-text").textContent = z[1];
+    var cov = Math.min(1, v);
+    document.getElementById("ro-steel-mm").textContent = fmt(cov * 103.8, 0) + " of 103.8 mm";
+    document.getElementById("ro-plastic-mm").textContent = fmt(cov * 76, 0) + " of 76 mm";
+    document.getElementById("ro-steel-near").textContent = nearText(STEEL, STEEL_BASE, v);
+    document.getElementById("ro-plastic-near").textContent = nearText(PLASTIC, PLASTIC_BASE, v);
+  }
+  slider.addEventListener("input", updateImm);
+  document.querySelectorAll(".presets button").forEach(function (b) {
+    b.addEventListener("click", function () { slider.value = b.getAttribute("data-v"); updateImm(); });
+  });
+  updateImm();
+
+  /* ---------------- model chart ---------------- */
+  var MODELS = ["Linear", "Quadratic", "Gaussian process", "Random forest"];
+  var MC = [
+    { out: "Steel total flow", raw: [0.64, 0.83, 0.98, 0.56], phys: [0.67, 0.88, 0.98, 0.88] },
+    { out: "Steel fan power", raw: [0.37, 0.28, 0.91, -0.03], phys: [0.46, 0.68, 0.96, 0.78] },
+    { out: "Plastic total flow", raw: [-0.26, 0.89, 0.08, -0.02], phys: [-0.26, 0.92, 0.71, 0.46] },
+    { out: "Plastic CAC flow", raw: [0.45, 0.95, 0.45, 0.34], phys: [0.45, 0.96, 0.82, 0.59] }
+  ];
+  var mcs = document.getElementById("modelchart");
+  var MCL = { x0: 150, w: 340, step: 22, gh: 4 * 22 + 30, top: 34 };
+  function mx(v) { return MCL.x0 + Math.max(0, v) * MCL.w; }
+  var mcBars = [];
+  (function buildModelChart() {
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (t) {
+      el("line", { x1: mx(t), x2: mx(t), y1: MCL.top - 6, y2: MCL.top + 4 * MCL.gh - 8, stroke: "var(--rule)", "stroke-width": 1 }, mcs);
+      txt(mcs, mx(t), MCL.top - 12, fmt(t), "s-ink3 s-mono", { "text-anchor": "middle", "font-size": 11 });
+    });
+    MC.forEach(function (g, k) {
+      var gy = MCL.top + k * MCL.gh;
+      txt(mcs, 8, gy + 14, g.out, "s-ink", { "font-size": 13, "font-weight": 600 });
+      MODELS.forEach(function (m, j) {
+        var yy = gy + 24 + j * MCL.step;
+        var lbl = txt(mcs, MCL.x0 - 8, yy + 11, m, "s-ink3", { "text-anchor": "end", "font-size": 12 });
+        var bar = el("rect", { x: MCL.x0, y: yy, width: 2, height: 15, rx: 3, "class": "mc-bar" }, mcs);
+        var val = txt(mcs, MCL.x0 + 6, yy + 11, "", "s-ink3 s-mono", { "font-size": 11 });
+        var hit = el("rect", { x: 0, y: yy - 3, width: 560, height: 21, fill: "transparent" }, mcs);
+        var rec = { k: k, j: j, bar: bar, val: val, lbl: lbl, hit: hit };
+        hit.addEventListener("pointerenter", function (e) { showTip(rec.html, e.clientX, e.clientY); });
+        hit.addEventListener("pointermove", function (e) { showTip(rec.html, e.clientX, e.clientY); });
+        hit.addEventListener("pointerleave", hideTip);
+        mcBars.push(rec);
+      });
+    });
+  })();
+  var READ = {
+    phys: "With physics features the Gaussian process wins on steel and the quadratic response surface wins on plastic. The framework therefore compares models per dataset instead of fixing one.",
+    raw: "With raw depths most steel models lose accuracy (random forest 0.56 instead of 0.88 on total flow), and the Gaussian process with default settings fails on plastic total flow. Feature engineering is worth the effort."
+  };
+  function drawModel(mode) {
+    MC.forEach(function (g, k) {
+      var vals = g[mode], best = Math.max.apply(null, vals);
+      mcBars.filter(function (r) { return r.k === k; }).forEach(function (r) {
+        var v = vals[r.j], on = v === best;
+        r.bar.setAttribute("width", Math.max(2, mx(v) - MCL.x0));
+        r.bar.setAttribute("fill", on ? "var(--amber)" : "var(--ink-3)");
+        r.bar.setAttribute("fill-opacity", on ? 1 : 0.35);
+        r.val.setAttribute("x", mx(v) + 6);
+        r.val.textContent = v < 0 ? "< 0 (" + fmt(v) + ")" : fmt(v);
+        r.val.setAttribute("class", on ? "s-ink s-mono" : "s-ink3 s-mono");
+        r.val.setAttribute("font-weight", on ? 600 : 400);
+        r.lbl.setAttribute("class", on ? "s-ink" : "s-ink3");
+        r.lbl.setAttribute("font-weight", on ? 600 : 400);
+        r.html = "<b>" + g.out + " · " + MODELS[r.j] + "</b>Q² = " + fmt(v) + (mode === "phys" ? " (physics features)" : " (raw depths)");
+      });
+    });
+    document.getElementById("mc-read").textContent = READ[mode];
+    document.getElementById("mc-phys").setAttribute("aria-pressed", mode === "phys");
+    document.getElementById("mc-raw").setAttribute("aria-pressed", mode === "raw");
+  }
+  document.getElementById("mc-phys").addEventListener("click", function () { drawModel("phys"); });
+  document.getElementById("mc-raw").addEventListener("click", function () { drawModel("raw"); });
+  drawModel("phys");
+
+  /* ---------------- core-only filter ---------------- */
+  function setFilter(coreOnly) {
+    document.body.classList.toggle("core-only", coreOnly);
+    document.getElementById("f-all").setAttribute("aria-pressed", !coreOnly);
+    document.getElementById("f-core").setAttribute("aria-pressed", coreOnly);
+    try { localStorage.setItem("fanml-guide-filter", coreOnly ? "core" : "all"); } catch (e) { /* storage unavailable */ }
+  }
+  document.getElementById("f-all").addEventListener("click", function () { setFilter(false); });
+  document.getElementById("f-core").addEventListener("click", function () { setFilter(true); });
+  try { if (localStorage.getItem("fanml-guide-filter") === "core") setFilter(true); } catch (e) { /* ignore */ }
+
+  /* ---------------- stage nav highlight ---------------- */
+  var links = Array.prototype.slice.call(document.querySelectorAll(".stagenav a"));
+  var targets = links.map(function (a) { return document.querySelector(a.getAttribute("href")); });
+  function markActive() {
+    var y = 120, idx = -1;
+    targets.forEach(function (t, i) { if (t && t.getBoundingClientRect().top <= y) idx = i; });
+    links.forEach(function (a, i) { a.classList.toggle("active", i === idx); });
+  }
+  window.addEventListener("scroll", markActive, { passive: true });
+  markActive();
+
+  /* ---------------- glossary + term tips ---------------- */
+  var gl = document.getElementById("glossary-list");
+  GLOSSARY.forEach(function (g) {
+    var d = document.createElement("div"); d.id = "g-" + g[0];
+    d.innerHTML = "<dt>" + g[1] + "</dt><dd>" + g[2] + "</dd>";
+    gl.appendChild(d);
+  });
+  document.querySelectorAll(".term").forEach(function (t) {
+    var g = GMAP[t.getAttribute("data-term")];
+    if (!g) return;
+    var html = "<b>" + g[1] + "</b>" + g[2];
+    function at() { var r = t.getBoundingClientRect(); showTip(html, r.left, r.top); }
+    t.addEventListener("pointerenter", at);
+    t.addEventListener("pointerleave", hideTip);
+    t.addEventListener("focus", at);
+    t.addEventListener("blur", hideTip);
+    t.addEventListener("click", function () { if (tip.hidden) at(); else hideTip(); });
+  });
+  window.addEventListener("scroll", hideTip, { passive: true });
+})();
+</script>
+</body>
+</html>
