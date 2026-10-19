@@ -23,6 +23,14 @@ FORMULA_TOL = 1e-6         # recalculated vs sheet value of a derived column
 HIGH_PRECISION_DIGITS = 8  # outputs with at least this many significant digits
 LOW_PRECISION_DIGITS = 5   # outputs with at most this many significant digits
 
+# Models and validation (sections 5-6)
+SELECTION_TOLERANCE = 0.05  # pick the simplest model whose LOO RMSE is within 5 % of the best
+CV_INNER_FOLDS = 5          # inner folds of the nested cross-validation
+GP_RESTARTS = 8             # optimiser restarts of the Gaussian process
+GP_RESTARTS_INNER = 3       # ... inside the nested cross-validation (speed)
+RANDOM_STATE = 0
+N_JOBS = -1                 # parallel jobs for cross-validation (-1 = all cores)
+
 
 # --------------------------------------------------------------------------------------
 # Derived features (physics coordinates). Each takes the tidy DataFrame, returns a Series.
@@ -73,6 +81,8 @@ DATASETS = {
         "derived": {"imm": steel_immersion, "split": steel_split},
         "check_derived": {"imm": "imm_sheet"},   # recalculated column -> sheet column
         "physics_features": ["imm", "split", "tri_large", "tri_small"],
+        "targets": ["total", "power", "cac"],     # outputs modelled in sections 5-6
+        "later_runs_from": 21,                    # later-runs test: train on Runs 1-20
         "key_x": "imm",
         "coverage_pairs": [("imm", "split"), ("imm", "tri_large"), ("imm", "tri_small")],
         "baseline_run": "Baseline",
@@ -132,6 +142,8 @@ DATASETS = {
         "derived": {"imm": plastic_immersion, "split": plastic_split},
         "check_derived": {"imm": "imm_sheet"},
         "physics_features": ["imm", "box", "ring"],
+        "targets": ["total", "cac"],
+        "later_runs_from": 16,                    # later-runs test: train on Runs 0-15
         "key_x": "imm",
         "coverage_pairs": [("imm", "box"), ("imm", "ring"), ("imm", "split")],
         "baseline_run": "Run 0",
@@ -181,6 +193,8 @@ DATASETS = {
         "derived": {},
         "check_derived": {},
         "physics_features": ["p1"],
+        "targets": ["total"],
+        "later_runs_from": None,                  # runs ordered by parameter, no later batch
         "key_x": "p1",
         "coverage_pairs": [],
         "baseline_run": "Run 2",                  # Parameter 1 = 0, assumed reference (A7)

@@ -4,7 +4,8 @@ Machine-learning framework for excavator cooling-fan shroud data. It turns a sma
 tested shroud geometries into a validated model that predicts air flow through each cooler
 and fan power for untested designs, with an uncertainty, and suggests which runs to measure next.
 
-> Work in progress: milestones M1–M2 (data checks, exploration, structure) are in place.
+> Work in progress: milestones M1–M3 (data checks, exploration, structure, models and
+> validation) are in place.
 > The full handover README comes with milestone M6.
 
 ## Quick start

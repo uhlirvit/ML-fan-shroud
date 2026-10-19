@@ -9,12 +9,16 @@ Sections
     3. Features                               (notebook section 4)
     4. Exploratory analysis                   (notebook section 2)
     5. Structure (unsupervised)               (notebook section 3)
-    6. Findings text for the takeaway cells
+    6. Findings text for the takeaway cells   (sections 1-4)
+    7. Models                                 (notebook section 5)
+    8. Validation and selection               (notebook section 6)
 """
 from __future__ import annotations
 
+import itertools
 import platform
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,11 +28,19 @@ import numpy as np
 import pandas as pd
 import scipy
 import sklearn
+from joblib import Parallel, delayed
 from matplotlib.colors import LinearSegmentedColormap
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.feature_selection import mutual_info_regression
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import StandardScaler
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import ConstantKernel, DotProduct, Matern, WhiteKernel
+from sklearn.linear_model import LinearRegression, RidgeCV
+from sklearn.model_selection import KFold
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
 import settings as S
 
@@ -802,4 +814,498 @@ def findings_features(check: pd.DataFrame, cfg: dict):
                      f"{phys['max |r| between features']:.2f} (physics); condition number "
                      f"{raw['condition number']:.2f} vs {phys['condition number']:.2f}.")
     items.append("Physics features used from section 5 on: " + ", ".join(short(cfg, c) for c in cfg["physics_features"]) + ".")
+    return md(f"**Findings for this dataset ({cfg['name']}):**\n\n" + _bullets(items))
+
+
+# ======================================================================================
+# 7. Models
+# ======================================================================================
+class GaussianProcessModel(BaseEstimator, RegressorMixin):
+    """Gaussian process (Kriging) for small engineering datasets.
+
+    Kernel: Matern 5/2 with one length scale per input (ARD: a very long length scale
+    means the input barely matters) + a quadratic trend kernel (keeps a sensible global
+    shape where runs are sparse) + white noise (learned measurement/simulation noise, A1).
+    Inputs are standardised; the target is normalised inside the GP. Several optimiser
+    restarts guard against poor local optima, which are common with few runs.
+    """
+
+    def __init__(self, restarts: int = 8, random_state: int = 0):
+        self.restarts = restarts
+        self.random_state = random_state
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=float)
+        d = X.shape[1]
+        self.scaler_ = StandardScaler().fit(X)
+        kernel = (ConstantKernel(1.0) * Matern(length_scale=np.ones(d), length_scale_bounds=(1e-2, 1e3), nu=2.5)
+                  + ConstantKernel(1.0) * DotProduct(1.0) ** 2
+                  + WhiteKernel(1e-3, (1e-6, 1.0)))
+        self.gp_ = GaussianProcessRegressor(kernel, normalize_y=True, n_restarts_optimizer=self.restarts,
+                                            random_state=self.random_state)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            self.gp_.fit(self.scaler_.transform(X), np.asarray(y, dtype=float))
+        return self
+
+    def predict(self, X, return_std: bool = False):
+        Xs = self.scaler_.transform(np.asarray(X, dtype=float))
+        return self.gp_.predict(Xs, return_std=return_std)
+
+    def length_scales(self) -> np.ndarray:
+        """Fitted ARD length scales (in standardised input units)."""
+        return np.atleast_1d(self.gp_.kernel_.k1.k1.k2.length_scale)
+
+    def noise_share(self) -> float:
+        """Learned noise variance as a share of the target variance (0 = interpolates)."""
+        return float(self.gp_.kernel_.k2.noise_level)
+
+
+MODEL_ORDER = ["Linear", "Quadratic", "Gaussian process", "Random forest"]   # simple -> complex
+CONTRAST_ONLY = {"Random forest"}   # reported for contrast, never selected
+
+
+def model_zoo(restarts: int | None = None) -> dict:
+    """Model factories (each call returns a fresh, unfitted model), ordered simple -> complex."""
+    r = S.GP_RESTARTS if restarts is None else restarts
+    return {
+        "Linear": lambda: make_pipeline(StandardScaler(), LinearRegression()),
+        "Quadratic": lambda: make_pipeline(StandardScaler(), PolynomialFeatures(2, include_bias=False),
+                                           RidgeCV(alphas=np.logspace(-4, 3, 30))),
+        "Gaussian process": lambda: GaussianProcessModel(restarts=r, random_state=S.RANDOM_STATE),
+        "Random forest": lambda: RandomForestRegressor(n_estimators=500, min_samples_leaf=2,
+                                                       random_state=S.RANDOM_STATE),
+    }
+
+
+def describe_models() -> pd.DataFrame:
+    """One line per model for the notebook: what it is and its role."""
+    rows = [
+        ("Linear", "Straight-line fit on standardised features.", "Reference every model must beat."),
+        ("Quadratic", "Second-order response surface (all squares and interactions), ridge-regularised; "
+                      "the penalty is chosen by internal cross-validation.", "Candidate."),
+        ("Gaussian process", "Kriging: Matern 5/2 kernel with one length scale per feature, plus a quadratic "
+                             "trend and learned noise. Returns an uncertainty with every prediction.", "Candidate."),
+        ("Random forest", "500 regression trees, at least 2 runs per leaf.",
+         "Contrast only: step-shaped, cannot extrapolate."),
+    ]
+    return pd.DataFrame(rows, columns=["model", "what it is", "role"]).set_index("model")
+
+
+def _fit_predict(factory, X, y, train, test):
+    m = factory().fit(X[train], y[train])
+    if isinstance(m, GaussianProcessModel):
+        mu, sd = m.predict(X[test], return_std=True)
+        return mu, sd
+    return m.predict(X[test]), np.full(len(test), np.nan)
+
+
+def loo_predict(factory, X, y, n_jobs: int | None = None):
+    """Leave-one-out predictions (and standard deviations for the Gaussian process)."""
+    X, y = np.asarray(X, float), np.asarray(y, float)
+    n = len(y)
+    folds = [(np.delete(np.arange(n), i), np.array([i])) for i in range(n)]
+    out = Parallel(n_jobs=S.N_JOBS if n_jobs is None else n_jobs)(
+        delayed(_fit_predict)(factory, X, y, tr, te) for tr, te in folds)
+    pred = np.array([o[0][0] for o in out])
+    std = np.array([o[1][0] for o in out])
+    return pred, std
+
+
+def scores(y, pred, scale: float | None = None) -> dict:
+    """Q2 (R2 of predictions on unseen runs), RMSE, RMSE as % of `scale`, MAE, max error."""
+    y, pred = np.asarray(y, float), np.asarray(pred, float)
+    err = pred - y
+    rmse = float(np.sqrt(np.mean(err ** 2)))
+    out = {"q2": float(1 - np.sum(err ** 2) / np.sum((y - y.mean()) ** 2)),
+           "rmse": rmse, "mae": float(np.mean(np.abs(err))), "max_abs_err": float(np.max(np.abs(err)))}
+    out["rmse_pct"] = 100 * rmse / abs(scale) if scale else np.nan
+    return out
+
+
+# ======================================================================================
+# 8. Validation and selection
+# ======================================================================================
+@dataclass
+class CVResult:
+    """Leave-one-out results: one metrics row and one prediction table per
+    (target, feature set, model)."""
+    metrics: pd.DataFrame
+    preds: dict
+
+    def pred(self, target: str, feature_set: str, model: str) -> pd.DataFrame:
+        return self.preds[(target, feature_set, model)]
+
+
+def baseline_value(data: pd.DataFrame, cfg: dict, target: str) -> float | None:
+    b = cfg["baseline_run"]
+    return float(data.loc[b, target]) if b in data.index else None
+
+
+def cross_validate(data: pd.DataFrame, cfg: dict, targets=None, feature_sets=None,
+                   models=None) -> CVResult:
+    """Leave-one-out predictions of every model on every target and feature set."""
+    targets = targets or cfg["targets"]
+    feature_sets = feature_sets or feature_sets_for(cfg)
+    zoo = model_zoo()
+    models = models or list(zoo)
+    des = design_rows(data, cfg)
+    rows, preds = [], {}
+    for t in targets:
+        y = des[t].to_numpy(float)
+        scale = baseline_value(data, cfg, t)
+        for fs_name, cols in feature_sets.items():
+            X = des[cols].to_numpy(float)
+            for m in models:
+                p, s = loo_predict(zoo[m], X, y)
+                table = pd.DataFrame({"measured": y, "predicted": p, "std": s}, index=des.index)
+                table["error"] = table["predicted"] - table["measured"]
+                preds[(t, fs_name, m)] = table
+                sc = scores(y, p, scale)
+                worst = table["error"].abs().idxmax()
+                rows.append({"target": t, "features": fs_name, "model": m, **sc, "worst_run": worst})
+    return CVResult(pd.DataFrame(rows), preds)
+
+
+def feature_sets_for(cfg: dict) -> dict:
+    """Raw vs physics feature sets; identical sets (one input) are reported once."""
+    fs = feature_sets(cfg)
+    if fs["raw"] == fs["physics"]:
+        return {"physics": fs["physics"]}
+    return fs
+
+
+def _choose(rmse: dict, tol: float) -> tuple[str, str]:
+    """Simplest candidate model whose RMSE is within `tol` of the best one."""
+    cands = {m: v for m, v in rmse.items() if m not in CONTRAST_ONLY}
+    best = min(cands, key=cands.get)
+    for m in MODEL_ORDER:
+        if m in cands and cands[m] <= cands[best] * (1 + tol):
+            return m, best
+    return best, best
+
+
+def select_models(cv: CVResult, cfg: dict, feature_set: str = "physics",
+                  tol: float | None = None) -> pd.DataFrame:
+    """Chosen model per target (simplest within tolerance of the lowest LOO RMSE)."""
+    tol = S.SELECTION_TOLERANCE if tol is None else tol
+    rows = []
+    for t, g in cv.metrics[cv.metrics["features"] == feature_set].groupby("target", sort=False):
+        g = g.set_index("model")
+        chosen, best = _choose(g["rmse"].to_dict(), tol)
+        reason = ("lowest RMSE" if chosen == best else
+                  f"within {100 * tol:.0f} % of {best} (RMSE {g.loc[best, 'rmse']:.4g}), simpler")
+        rows.append({"target": t, "model": chosen, "features": feature_set,
+                     "q2": g.loc[chosen, "q2"], "rmse": g.loc[chosen, "rmse"],
+                     "rmse_pct": g.loc[chosen, "rmse_pct"], "reason": reason})
+    return pd.DataFrame(rows).set_index("target")
+
+
+def _nested_fold(zoo, X, y, train, test, inner_folds, tol):
+    k = min(inner_folds, len(train))
+    kf = KFold(n_splits=k, shuffle=True, random_state=S.RANDOM_STATE)
+    rmse = {}
+    for m, factory in zoo.items():
+        if m in CONTRAST_ONLY:
+            continue
+        err = []
+        for itr, ite in kf.split(train):
+            p, _ = _fit_predict(factory, X, y, train[itr], train[ite])
+            err.append(p - y[train[ite]])
+        rmse[m] = float(np.sqrt(np.mean(np.concatenate(err) ** 2)))
+    chosen, _ = _choose(rmse, tol)
+    p, _ = _fit_predict(zoo[chosen], X, y, train, test)
+    return p[0], chosen
+
+
+def nested_cv(data: pd.DataFrame, cfg: dict, targets=None, feature_set: str = "physics",
+              tol: float | None = None) -> pd.DataFrame:
+    """Honest score of the whole procedure 'compare models, pick one, predict'.
+
+    Outer loop: leave one run out. Inner loop: k-fold cross-validation on the remaining
+    runs picks a model with the same rule as `select_models`; that model then predicts
+    the left-out run. The score therefore includes the luck of the model choice.
+    """
+    tol = S.SELECTION_TOLERANCE if tol is None else tol
+    targets = targets or cfg["targets"]
+    zoo = model_zoo(restarts=S.GP_RESTARTS_INNER)
+    des = design_rows(data, cfg)
+    X = des[feature_sets(cfg)[feature_set]].to_numpy(float)
+    n = len(des)
+    rows = []
+    for t in targets:
+        y = des[t].to_numpy(float)
+        folds = [(np.delete(np.arange(n), i), np.array([i])) for i in range(n)]
+        out = Parallel(n_jobs=S.N_JOBS)(delayed(_nested_fold)(zoo, X, y, tr, te, S.CV_INNER_FOLDS, tol)
+                                        for tr, te in folds)
+        pred = np.array([o[0] for o in out])
+        picks = pd.Series([o[1] for o in out]).value_counts()
+        sc = scores(y, pred, baseline_value(data, cfg, t))
+        rows.append({"target": t, "nested_q2": sc["q2"], "nested_rmse": sc["rmse"],
+                     "nested_rmse_pct": sc["rmse_pct"],
+                     "models picked (of %d folds)" % n: ", ".join(f"{m} {c}" for m, c in picks.items())})
+    return pd.DataFrame(rows).set_index("target")
+
+
+def later_runs_test(data: pd.DataFrame, cfg: dict, targets=None, feature_set: str = "physics",
+                    models=None) -> pd.DataFrame | None:
+    """Train on the earlier runs, predict the later ones (as the model would be used)."""
+    split = cfg.get("later_runs_from")
+    if split is None:
+        return None
+    targets = targets or cfg["targets"]
+    zoo = model_zoo()
+    models = models or list(zoo)
+    des = design_rows(data, cfg)
+    train = np.where(des["run_no"].to_numpy() < split)[0]
+    test = np.where(des["run_no"].to_numpy() >= split)[0]
+    rows = []
+    for fs_name, cols in feature_sets_for(cfg).items():
+        X = des[cols].to_numpy(float)
+        for t in targets:
+            y = des[t].to_numpy(float)
+            for m in models:
+                p, _ = _fit_predict(zoo[m], X, y, train, test)
+                err = p - y[test]
+                worst = des.index[test][int(np.argmax(np.abs(err)))]
+                scale = baseline_value(data, cfg, t)
+                rmse = float(np.sqrt(np.mean(err ** 2)))
+                rows.append({"target": t, "features": fs_name, "model": m, "rmse": rmse,
+                             "rmse_pct": 100 * rmse / scale if scale else np.nan,
+                             "max_abs_err": float(np.max(np.abs(err))), "worst_run": worst})
+    res = pd.DataFrame(rows)
+    res.attrs.update(n_train=len(train), n_test=len(test),
+                     train_runs=compress_runs(list(des.index[train])),
+                     test_runs=compress_runs(list(des.index[test])))
+    return res
+
+
+def interval_coverage(cv: CVResult, target: str, feature_set: str = "physics",
+                      model: str = "Gaussian process") -> dict:
+    """Share of left-out runs inside the GP's 68 % and 95 % prediction bands.
+
+    ``calibration`` is the root-mean-square of the standardised errors z = (measured -
+    predicted) / std. A well-calibrated model gives about 1; 1.5 means the bands must be
+    widened by 1.5 to be honest. ``inside_95_calibrated`` is the coverage after widening.
+    """
+    p = cv.pred(target, feature_set, model)
+    z = (p["measured"] - p["predicted"]) / p["std"]
+    k = float(np.sqrt(np.mean(z ** 2)))
+    return {"target": target, "n": len(z), "inside_68": float((z.abs() <= 1.0).mean()),
+            "inside_95": float((z.abs() <= 1.96).mean()), "calibration": k,
+            "inside_95_calibrated": float((z.abs() / k <= 1.96).mean()),
+            "outside_95": list(z.index[z.abs() > 1.96])}
+
+
+def variant_sensitivity(cfg: dict, target: str, model: str, feature_set: str = "physics") -> pd.DataFrame | None:
+    """Re-run leave-one-out under each data variant (e.g. Run 17 recorded/corrected/excluded)."""
+    if not cfg["variants"]:
+        return None
+    rows = []
+    for v in ["recorded", *cfg["variants"]]:
+        d = add_features(load_dataset(cfg, variant=v), cfg)
+        des = design_rows(d, cfg)
+        X, y = des[feature_sets(cfg)[feature_set]].to_numpy(float), des[target].to_numpy(float)
+        p, _ = loo_predict(model_zoo()[model], X, y)
+        sc = scores(y, p, baseline_value(d, cfg, target))
+        rows.append({"variant": v, "runs": len(des), "q2": sc["q2"], "rmse": sc["rmse"],
+                     "rmse_pct": sc["rmse_pct"], "max_abs_err": sc["max_abs_err"]})
+    return pd.DataFrame(rows).set_index("variant")
+
+
+def baseline_check(data: pd.DataFrame, cfg: dict, selection: pd.DataFrame,
+                   feature_set: str = "physics") -> pd.DataFrame | None:
+    """Predict a baseline row that has no inputs (so it was never used for training).
+
+    The baseline geometry comes from the settings (A3). Inputs that stay unknown are
+    swept over their low, middle and high values; the table reports the mean and the
+    range of those predictions.
+    """
+    if cfg["baseline_has_inputs"]:
+        return None
+    b = baseline_point(data, cfg)
+    if b is None:
+        return None
+    cols = feature_sets(cfg)[feature_set]
+    unknown = [c for c in cols if pd.isna(b.get(c, np.nan))]
+    grid = list(itertools.product(*[(cfg["bounds"][c][0], np.mean(cfg["bounds"][c]), cfg["bounds"][c][1])
+                                    for c in unknown])) or [()]
+    des = design_rows(data, cfg)
+    rows = []
+    for t, sel in selection.iterrows():
+        model = model_zoo()[sel["model"]]().fit(des[cols].to_numpy(float), des[t].to_numpy(float))
+        X = np.array([[dict(zip(unknown, combo)).get(c, b[c]) for c in cols] for combo in grid], float)
+        if isinstance(model, GaussianProcessModel):
+            mu, sd = model.predict(X, return_std=True)
+        else:
+            mu, sd = model.predict(X), np.full(len(X), np.nan)
+        rows.append({"target": t, "model": sel["model"], "measured": float(b[t]),
+                     "predicted": float(mu.mean()), "std": float(np.nanmean(sd)) if np.isfinite(sd).any() else np.nan,
+                     "range over unknown inputs": f"{mu.min():.3f} to {mu.max():.3f}",
+                     "error_pct": 100 * (mu.mean() - b[t]) / b[t]})
+    res = pd.DataFrame(rows).set_index("target")
+    res.attrs["unknown_inputs"] = unknown
+    return res
+
+
+# ----- plots ---------------------------------------------------------------------------
+def plot_model_comparison(cv: CVResult, cfg: dict):
+    """Leave-one-out Q2 of every model, per target; one panel per feature set."""
+    m = cv.metrics
+    fsets = list(dict.fromkeys(m["features"]))
+    targets = list(dict.fromkeys(m["target"]))
+    models = [x for x in MODEL_ORDER if x in set(m["model"])]
+    fig, axes = plt.subplots(1, len(fsets), figsize=(6.2 * len(fsets), 0.9 + 1.05 * len(targets) * len(models) * 0.32 + 0.6),
+                             squeeze=False, sharex=True)
+    for ax, fs in zip(axes.flat, fsets):
+        sub = m[m["features"] == fs]
+        ypos, labels_, k = [], [], 0
+        for t in targets:
+            g = sub[sub["target"] == t].set_index("model")
+            best = g.loc[[x for x in models if x not in CONTRAST_ONLY], "rmse"].idxmin()
+            for mod in models:
+                q = g.loc[mod, "q2"]
+                ax.barh(k, max(q, 0), color=ACCENT if mod == best else INK3,
+                        alpha=1 if mod == best else 0.45, height=0.75)
+                ax.text(max(q, 0) + 0.01, k, f"{q:.2f}" if q >= 0 else f"< 0 ({q:.2f})", va="center",
+                        fontsize=8, color=INK if mod == best else INK2,
+                        fontweight="bold" if mod == best else "normal")
+                ypos.append(k)
+                labels_.append(f"{short(cfg, t)} · {mod}")
+                k += 1
+            k += 0.8
+        ax.set_yticks(ypos, labels_, fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xlim(0, 1.15)
+        ax.set_xlabel("Leave-one-out Q² [-] (1 = perfect, 0 = no better than the mean)")
+        ax.set_title(f"{fs.capitalize()} features")
+    fig.suptitle(f"{cfg['title']}: model accuracy on runs left out (amber = lowest RMSE among candidates)",
+                 x=0.01, ha="left", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    return fig
+
+
+def plot_parity(cv: CVResult, cfg: dict, target: str, feature_set: str = "physics", flagged=None,
+                n_label: int = 3):
+    """Measured vs leave-one-out prediction for every model (GP with 95 % bands)."""
+    models = [x for x in MODEL_ORDER if (target, feature_set, x) in cv.preds]
+    fig, axes = plt.subplots(1, len(models), figsize=(3.6 * len(models), 3.7), squeeze=False)
+    unit = cfg["units"].get(target, "")
+    allv = pd.concat([cv.pred(target, feature_set, mo)[["measured", "predicted"]] for mo in models])
+    lo, hi = allv.min().min(), allv.max().max()
+    pad = 0.06 * (hi - lo)
+    for ax, mo in zip(axes.flat, models):
+        p = cv.pred(target, feature_set, mo)
+        if p["std"].notna().any():
+            ax.errorbar(p["measured"], p["predicted"], yerr=1.96 * p["std"], fmt="none",
+                        ecolor=INK3, elinewidth=0.8, alpha=0.6, zorder=2)
+        ax.scatter(p["measured"], p["predicted"], s=22, color=DATA, edgecolor="white", linewidth=0.5, zorder=3)
+        for r in (flagged or []):
+            if r in p.index:
+                ax.scatter(p.loc[r, "measured"], p.loc[r, "predicted"], s=100, facecolor="none",
+                           edgecolor=FLAG, linewidth=1.5, zorder=4)
+        for r in p["error"].abs().nlargest(n_label).index:
+            ax.annotate(str(_run_number(r)) if re.search(r"\d", r) else r,
+                        (p.loc[r, "measured"], p.loc[r, "predicted"]), xytext=(3, -9),
+                        textcoords="offset points", fontsize=7, color=INK2)
+        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color=INK3, lw=0.9, ls="--")
+        ax.set_xlim(lo - pad, hi + pad)
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_aspect("equal")
+        sc = scores(p["measured"], p["predicted"])
+        ax.set_title(f"{mo}\nQ² = {sc['q2']:.2f}, RMSE = {sc['rmse']:.3g} {unit}", fontsize=10)
+        ax.set_xlabel(f"Measured [{unit}]")
+        ax.set_ylabel(f"Predicted, run left out [{unit}]")
+    fig.suptitle(f"{cfg['title']}: {short(cfg, target).lower()}, measured vs predicted "
+                 f"({feature_set} features; numbers = runs with the largest errors)",
+                 x=0.01, ha="left", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    return fig
+
+
+def plot_residuals(cv: CVResult, data: pd.DataFrame, cfg: dict, target: str, model: str,
+                   feature_set: str = "physics"):
+    """Prediction errors of one model against each feature: a pattern means missing physics."""
+    p = cv.pred(target, feature_set, model)
+    cols = feature_sets(cfg)[feature_set]
+    des = design_rows(data, cfg)
+    rmse = scores(p["measured"], p["predicted"])["rmse"]
+    unit = cfg["units"].get(target, "")
+    fig, axes = plt.subplots(1, len(cols), figsize=(3.6 * len(cols), 3.1), squeeze=False, sharey=True)
+    for ax, c in zip(axes.flat, cols):
+        ax.axhspan(-rmse, rmse, color=RULE, alpha=0.6, lw=0)
+        ax.axhline(0, color=INK3, lw=0.9)
+        ax.scatter(des.loc[p.index, c], p["error"], s=22, color=DATA, edgecolor="white", linewidth=0.5)
+        _annotate_runs(ax, des.loc[p.index, c], p["error"], p.index)
+        ax.set_xlabel(label(cfg, c))
+    axes.flat[0].set_ylabel(f"Predicted - measured [{unit}]")
+    fig.suptitle(f"{cfg['title']}: {model} errors on {short(cfg, target).lower()} against each feature "
+                 f"(grey band = ± RMSE)", x=0.01, ha="left", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    return fig
+
+
+def plot_gp_bands(cv: CVResult, data: pd.DataFrame, cfg: dict, target: str, feature_set: str = "physics"):
+    """GP leave-one-out predictions with 95 % bands against the measured values, along the key variable."""
+    p = cv.pred(target, feature_set, "Gaussian process")
+    des = design_rows(data, cfg)
+    x = des.loc[p.index, cfg["key_x"]]
+    order = np.argsort(x.to_numpy())
+    xs, pm, ps, ym = x.to_numpy()[order], p["predicted"].to_numpy()[order], p["std"].to_numpy()[order], p["measured"].to_numpy()[order]
+    out = np.abs(ym - pm) > 1.96 * ps
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    ax.errorbar(xs, pm, yerr=1.96 * ps, fmt="o", ms=4, color=INK3, ecolor=INK3, elinewidth=1, capsize=2,
+                label="prediction, run left out (95 % band)")
+    ax.scatter(xs[~out], ym[~out], s=26, color=DATA, zorder=3, label="measured, inside band")
+    if out.any():
+        ax.scatter(xs[out], ym[out], s=40, color=FLAG, marker="D", zorder=4, label="measured, outside band")
+    ax.set_xlabel(label(cfg, cfg["key_x"]))
+    ax.set_ylabel(label(cfg, target))
+    ax.set_title(f"{cfg['title']}: Gaussian process uncertainty check, {short(cfg, target).lower()}")
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+    return fig
+
+
+# ----- findings -----------------------------------------------------------------------
+def findings_models(cfg: dict, cv: CVResult, sel: pd.DataFrame, nested: pd.DataFrame,
+                    later: pd.DataFrame | None, coverage: list, sens: pd.DataFrame | None,
+                    base: pd.DataFrame | None):
+    """Markdown bullets summarising sections 5-6 for the selected dataset."""
+    items = []
+    m = cv.metrics
+    for t, s in sel.iterrows():
+        unit = cfg["units"].get(t, "")
+        line = (f"**{short(cfg, t)}**: {s['model']} ({s['reason']}); leave-one-out Q² = {s['q2']:.2f}, "
+                f"RMSE = {s['rmse']:.3g} {unit} ({s['rmse_pct']:.1f} % of baseline).")
+        if t in nested.index:
+            nr = nested.loc[t]
+            line += (f" Nested (model choice included): Q² = {nr['nested_q2']:.2f}, "
+                     f"RMSE {nr['nested_rmse_pct']:.1f} % of baseline.")
+        if "raw" in set(m["features"]):
+            r = m[(m.target == t) & (m.features == "raw") & (m.model == s["model"])].iloc[0]
+            line += f" Same model on raw inputs: Q² = {r['q2']:.2f}."
+        items.append(line)
+    if later is not None:
+        sub = later[later.features == "physics"]
+        parts = []
+        for t, s in sel.iterrows():
+            r = sub[(sub.target == t) & (sub.model == s["model"])].iloc[0]
+            parts.append(f"{short(cfg, t).lower()} {r['rmse_pct']:.1f} % of baseline (worst {r['worst_run']})")
+        items.append(f"Later-runs test ({later.attrs['train_runs']} → {later.attrs['test_runs']}), "
+                     f"chosen models: RMSE " + "; ".join(parts) + ".")
+    for c in coverage:
+        verdict = ("well calibrated" if c["calibration"] <= 1.15 else
+                   f"too narrow: widen by {c['calibration']:.2f}× "
+                   f"(then {100 * c['inside_95_calibrated']:.0f} % inside)")
+        items.append(f"Gaussian process bands, {short(cfg, c['target']).lower()}: {100 * c['inside_95']:.0f} % "
+                     f"of runs inside the 95 % band, {verdict}"
+                     + (f"; outside: {compress_runs(c['outside_95'])}." if c["outside_95"] else "."))
+    if sens is not None:
+        items.append("Data variants (Run 17): " + "; ".join(
+            f"{v} Q² = {r['q2']:.2f}, RMSE {r['rmse_pct']:.1f} %" for v, r in sens.iterrows()) + ".")
+    if base is not None:
+        items.append("Baseline never used in training: " + "; ".join(
+            f"{short(cfg, t).lower()} predicted {r['predicted']:.3f} vs measured {r['measured']:.3f} "
+            f"({r['error_pct']:+.1f} %)" for t, r in base.iterrows()) + " (geometry assumed, A3).")
     return md(f"**Findings for this dataset ({cfg['name']}):**\n\n" + _bullets(items))
