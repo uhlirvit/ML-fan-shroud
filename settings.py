@@ -77,6 +77,7 @@ DATASETS = {
         "coverage_pairs": [("imm", "split"), ("imm", "tri_large"), ("imm", "tri_small")],
         "baseline_run": "Baseline",
         "baseline_has_inputs": False,
+        "baseline_assumed_inputs": {"ring": 0.0, "trans": 0.0},   # A3; triangles unknown
         "units": {"ring": "mm", "trans": "mm", "tri_large": "-", "tri_small": "-",
                   "imm": "-", "split": "mm", "rad": "kg/s", "hoc": "kg/s", "cac": "kg/s",
                   "fc": "kg/s", "total": "kg/s", "power": "kW"},
