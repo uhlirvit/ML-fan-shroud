@@ -773,10 +773,12 @@ footer.foot .wrap { display: grid; gap: 4px; }
 
   var GLOSSARY = [
     ["immersion", "Immersion", "Share of the fan blade's axial depth that sits inside the shroud ring. 0 = fully outside, 1 = fully covered."],
-    ["q2", "Q²", "The R² of predictions on runs the model did not see. 1 = perfect, 0 = no better than predicting the average, below 0 = worse than that."],
+    ["q2", "Q²", "1 − Σ(measured − predicted)² / Σ(measured − mean)², where each prediction comes from a model that never saw that run. 1 = perfect, 0 = no better than the average, below 0 = worse. Use it to compare models; it depends on how much the output varies (Q² ≈ 1 − (RMSE/SD)²)."],
     ["loo", "Leave-one-out (LOO)", "Predict each run with a model trained on all the other runs, then score all those predictions together."],
     ["nested", "Nested cross-validation", "Model choice and tuning are repeated inside every validation fold, so the score is not flattered by the selection."],
     ["rmse", "RMSE", "Root-mean-square error: the typical prediction error, in the output's own unit (kg/s, kW)."],
+    ["maxerr", "Max error", "The largest single miss on unseen runs, as % of the baseline value. Shows whether one run dominates the error."],
+    ["conformal", "Conformal interval", "A prediction interval built from the model's actual errors on unseen runs, so it is as wide as the model has really been wrong. Used at 90 % in the notebook."],
     ["gp", "Gaussian process (Kriging)", "A smooth interpolating model that gives an uncertainty with each prediction. Standard for expensive experiments."],
     ["ard", "Relevance weights (ARD)", "A Gaussian-process setting that learns one length scale per input. A very long scale means the input barely matters."],
     ["rsm", "Response surface", "A polynomial, here quadratic, fitted to designed experiments. Its coefficients read as effects and interactions."],

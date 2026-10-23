@@ -31,6 +31,14 @@ GP_RESTARTS_INNER = 3       # ... inside the nested cross-validation (speed)
 RANDOM_STATE = 0
 N_JOBS = -1                 # parallel jobs for cross-validation (-1 = all cores)
 
+# Interpretation, prediction and design (sections 7-9)
+INTERVAL_LEVEL = 0.90       # conformal prediction intervals; with ~25 runs a 95 % band
+                            # would simply equal the largest error seen
+SOBOL_N = 1024              # base samples for the Sobol indices (power of 2)
+POOL_SIZE = 8192            # candidate designs for optimisation and next runs (power of 2)
+N_NEXT_IMPROVE = 3          # next runs chosen to improve the design (expected improvement)
+N_NEXT_EXPLORE = 2          # next runs chosen to improve the model (largest uncertainty)
+
 
 # --------------------------------------------------------------------------------------
 # Derived features (physics coordinates). Each takes the tidy DataFrame, returns a Series.
@@ -53,6 +61,19 @@ def plastic_immersion(d):
 def plastic_split(d):
     """Ring minus transition depth (mm), the same shape coordinate as on steel."""
     return d["ring"] - d["trans"]
+
+
+# Inverse maps: physics features -> the raw inputs they replace (used to check designs
+# sampled in physics coordinates against the design limits).
+def steel_to_raw(p):
+    """Ring and transition depth (mm) from immersion and split."""
+    s = p["imm"] * 103.8 - 77.8
+    return {"ring": (s + p["split"]) / 2, "trans": (s - p["split"]) / 2}
+
+
+def plastic_to_raw(p):
+    """Transition depth (mm) from immersion, box and ring depth."""
+    return {"trans": 76 * (p["imm"] - 1) + 41.522 - p["box"] - p["ring"]}
 
 
 DATASETS = {
@@ -81,8 +102,21 @@ DATASETS = {
         "derived": {"imm": steel_immersion, "split": steel_split},
         "check_derived": {"imm": "imm_sheet"},   # recalculated column -> sheet column
         "physics_features": ["imm", "split", "tri_large", "tri_small"],
-        "targets": ["total", "power", "cac"],     # outputs modelled in sections 5-6
+        "targets": ["total", "power", "rad", "hoc", "cac", "fc"],   # all modelled outputs
+        "key_targets": ["total", "power", "cac"],  # shown in detail in sections 6-7
         "later_runs_from": 21,                    # later-runs test: train on Runs 1-20
+        "to_raw": steel_to_raw,
+        "range_features": ["imm", "split"],       # for "far from tested runs"; triangles
+                                                  # left out: no detectable effect (A4)
+        "map_pair": ("imm", "split"),
+        "what_if": [
+            {"design": "Baseline geometry (A3)", "ring": 0.0, "trans": 0.0, "tri_large": 0.5, "tri_small": 0.5},
+            {"design": "Transition shortened by 20 mm", "ring": 0.0, "trans": -20.0, "tri_large": 0.5, "tri_small": 0.5},
+            {"design": "Ring +40 mm, transition -55 mm", "ring": 40.0, "trans": -55.0, "tri_large": 0.5, "tri_small": 0.5},
+            {"design": "Ring and transition +40 mm", "ring": 40.0, "trans": 40.0, "tri_large": 0.5, "tri_small": 0.5},
+        ],
+        "optimisation": {"maximise": "total", "constraints": [("cac", ">=", "baseline")]},   # A6
+        "tradeoff": (("total", "max"), ("power", "min")),
         "key_x": "imm",
         "coverage_pairs": [("imm", "split"), ("imm", "tri_large"), ("imm", "tri_small")],
         "baseline_run": "Baseline",
@@ -142,8 +176,20 @@ DATASETS = {
         "derived": {"imm": plastic_immersion, "split": plastic_split},
         "check_derived": {"imm": "imm_sheet"},
         "physics_features": ["imm", "box", "ring"],
-        "targets": ["total", "cac"],
+        "targets": ["total", "rad", "hoc", "cac", "fc"],
+        "key_targets": ["total", "cac"],
         "later_runs_from": 16,                    # later-runs test: train on Runs 0-15
+        "to_raw": plastic_to_raw,
+        "range_features": ["imm", "box", "ring"],
+        "map_pair": ("imm", "box"),
+        "what_if": [
+            {"design": "Baseline (Run 0)", "box": 0.0, "ring": 0.0, "trans": 0.0},
+            {"design": "Ring +18 mm, transition -6 mm", "box": -1.0, "ring": 18.0, "trans": -6.0},
+            {"design": "Box +40 mm", "box": 40.0, "ring": 0.0, "trans": 0.0},
+            {"design": "All segments +40 mm", "box": 40.0, "ring": 40.0, "trans": 40.0},
+        ],
+        "optimisation": {"maximise": "total", "constraints": [("cac", ">=", "baseline")]},   # A6
+        "tradeoff": (("total", "max"), ("cac", "max")),
         "key_x": "imm",
         "coverage_pairs": [("imm", "box"), ("imm", "ring"), ("imm", "split")],
         "baseline_run": "Run 0",
@@ -194,7 +240,19 @@ DATASETS = {
         "check_derived": {},
         "physics_features": ["p1"],
         "targets": ["total"],
+        "key_targets": ["total"],
         "later_runs_from": None,                  # runs ordered by parameter, no later batch
+        "to_raw": None,
+        "range_features": ["p1"],
+        "map_pair": None,
+        "what_if": [
+            {"design": "Reference (Run 2)", "p1": 0.0},
+            {"design": "Parameter 1 = 0.15", "p1": 0.15},
+            {"design": "Parameter 1 = 0.75", "p1": 0.75},
+            {"design": "Parameter 1 = 1.5", "p1": 1.5},
+        ],
+        "optimisation": {"maximise": "total", "constraints": []},
+        "tradeoff": None,
         "key_x": "p1",
         "coverage_pairs": [],
         "baseline_run": "Run 2",                  # Parameter 1 = 0, assumed reference (A7)

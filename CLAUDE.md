@@ -33,7 +33,7 @@ plain-language methods guide: `guide/fan_ml_methods_guide.html`.
 
 ```
 python -m pytest -q
-python run_all.py          # executes the notebook for steel, plastic and ldr700 (~4 min)
+python run_all.py          # executes the notebook for steel, plastic and ldr700 (~6 min)
 ```
 
 ## Milestones
@@ -43,6 +43,6 @@ python run_all.py          # executes the notebook for steel, plastic and ldr700
 | M1 Data layer | 0–1 | Done (session 1) |
 | M2 Exploration and structure | 2–4 | Done (session 1) |
 | M3 Models and validation | 5–6 | Done (session 2) |
-| M4 Interpretation and prediction | 7–8 | Next |
-| M5 Optimisation and next runs | 9 | Planned |
-| M6 Handover | 10, README, guide | Planned |
+| M4 Interpretation and prediction | 7–8 | Done (session 3) |
+| M5 Optimisation and next runs | 9 | Done (session 3) |
+| M6 Handover | 10, README, guide | Next |

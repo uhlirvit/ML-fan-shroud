@@ -16,6 +16,7 @@ Sections
 from __future__ import annotations
 
 import itertools
+import math
 import platform
 import re
 import warnings
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import matplotlib
+import matplotlib.lines
+import matplotlib.patches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -30,6 +33,8 @@ import scipy
 import sklearn
 from joblib import Parallel, delayed
 from matplotlib.colors import LinearSegmentedColormap
+from scipy.spatial.distance import cdist
+from scipy.stats import norm, qmc
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestRegressor
@@ -843,10 +848,26 @@ class GaussianProcessModel(BaseEstimator, RegressorMixin):
                   + WhiteKernel(1e-3, (1e-6, 1.0)))
         self.gp_ = GaussianProcessRegressor(kernel, normalize_y=True, n_restarts_optimizer=self.restarts,
                                             random_state=self.random_state)
+        self.Xs_ = self.scaler_.transform(X)
+        self.y_ = np.asarray(y, dtype=float)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ConvergenceWarning)
-            self.gp_.fit(self.scaler_.transform(X), np.asarray(y, dtype=float))
+            self.gp_.fit(self.Xs_, self.y_)
         return self
+
+    def conditioned(self, X_new, y_new) -> "GaussianProcessModel":
+        """Copy with extra (pseudo-)observations and the kernel kept fixed.
+
+        Used by the next-run recommender ("kriging believer"): after picking a run, its
+        predicted value is treated as measured so the next pick goes somewhere else.
+        """
+        new = GaussianProcessModel(restarts=0, random_state=self.random_state)
+        new.scaler_ = self.scaler_
+        new.Xs_ = np.vstack([self.Xs_, self.scaler_.transform(np.atleast_2d(np.asarray(X_new, float)))])
+        new.y_ = np.concatenate([self.y_, np.atleast_1d(np.asarray(y_new, float))])
+        new.gp_ = GaussianProcessRegressor(self.gp_.kernel_, optimizer=None, normalize_y=True)
+        new.gp_.fit(new.Xs_, new.y_)
+        return new
 
     def predict(self, X, return_std: bool = False):
         Xs = self.scaler_.transform(np.asarray(X, dtype=float))
@@ -913,14 +934,29 @@ def loo_predict(factory, X, y, n_jobs: int | None = None):
 
 
 def scores(y, pred, scale: float | None = None) -> dict:
-    """Q2 (R2 of predictions on unseen runs), RMSE, RMSE as % of `scale`, MAE, max error."""
+    """Three views of the error on unseen runs.
+
+    - ``q2``: 1 - PRESS / TSS, the R2 of predictions on runs left out of training.
+      1 = perfect, 0 = no better than the mean, < 0 = worse. Use it to compare models
+      on the same output; it depends on how much that output varies.
+    - ``rmse``: typical error in the output's unit (also ``rmse_pct``, % of `scale`,
+      normally the baseline value). Use it to judge whether a model is good enough.
+    - ``max_abs_err``: the worst single miss (also ``max_abs_err_pct``). Use it to see
+      whether one run dominates the error.
+    ``mae`` (mean absolute error) is reported too. Q2 ~ 1 - (RMSE / SD of the output)^2.
+    """
     y, pred = np.asarray(y, float), np.asarray(pred, float)
     err = pred - y
     rmse = float(np.sqrt(np.mean(err ** 2)))
     out = {"q2": float(1 - np.sum(err ** 2) / np.sum((y - y.mean()) ** 2)),
            "rmse": rmse, "mae": float(np.mean(np.abs(err))), "max_abs_err": float(np.max(np.abs(err)))}
-    out["rmse_pct"] = 100 * rmse / abs(scale) if scale else np.nan
+    for k in ("rmse", "mae", "max_abs_err"):
+        out[f"{k}_pct"] = 100 * out[k] / abs(scale) if scale else np.nan
     return out
+
+
+METRIC_LABELS = {"q2": "Q\u00b2 [-]", "rmse_pct": "RMSE [% of baseline]",
+                 "max_abs_err_pct": "Max error [% of baseline]", "mae_pct": "MAE [% of baseline]"}
 
 
 # ======================================================================================
@@ -943,9 +979,14 @@ def baseline_value(data: pd.DataFrame, cfg: dict, target: str) -> float | None:
 
 
 def cross_validate(data: pd.DataFrame, cfg: dict, targets=None, feature_sets=None,
-                   models=None) -> CVResult:
-    """Leave-one-out predictions of every model on every target and feature set."""
+                   models=None, raw_targets=None) -> CVResult:
+    """Leave-one-out predictions of every model on every target.
+
+    Physics features are evaluated for all targets; the raw-input comparison only for
+    ``raw_targets`` (default: the key targets), which keeps the run time down.
+    """
     targets = targets or cfg["targets"]
+    raw_targets = cfg.get("key_targets", targets) if raw_targets is None else raw_targets
     feature_sets = feature_sets or feature_sets_for(cfg)
     zoo = model_zoo()
     models = models or list(zoo)
@@ -955,6 +996,8 @@ def cross_validate(data: pd.DataFrame, cfg: dict, targets=None, feature_sets=Non
         y = des[t].to_numpy(float)
         scale = baseline_value(data, cfg, t)
         for fs_name, cols in feature_sets.items():
+            if fs_name != "physics" and t not in raw_targets:
+                continue
             X = des[cols].to_numpy(float)
             for m in models:
                 p, s = loo_predict(zoo[m], X, y)
@@ -997,7 +1040,8 @@ def select_models(cv: CVResult, cfg: dict, feature_set: str = "physics",
                   f"within {100 * tol:.0f} % of {best} (RMSE {g.loc[best, 'rmse']:.4g}), simpler")
         rows.append({"target": t, "model": chosen, "features": feature_set,
                      "q2": g.loc[chosen, "q2"], "rmse": g.loc[chosen, "rmse"],
-                     "rmse_pct": g.loc[chosen, "rmse_pct"], "reason": reason})
+                     "rmse_pct": g.loc[chosen, "rmse_pct"],
+                     "max_abs_err_pct": g.loc[chosen, "max_abs_err_pct"], "reason": reason})
     return pd.DataFrame(rows).set_index("target")
 
 
@@ -1027,7 +1071,7 @@ def nested_cv(data: pd.DataFrame, cfg: dict, targets=None, feature_set: str = "p
     the left-out run. The score therefore includes the luck of the model choice.
     """
     tol = S.SELECTION_TOLERANCE if tol is None else tol
-    targets = targets or cfg["targets"]
+    targets = targets or cfg.get("key_targets", cfg["targets"])
     zoo = model_zoo(restarts=S.GP_RESTARTS_INNER)
     des = design_rows(data, cfg)
     X = des[feature_sets(cfg)[feature_set]].to_numpy(float)
@@ -1042,7 +1086,7 @@ def nested_cv(data: pd.DataFrame, cfg: dict, targets=None, feature_set: str = "p
         picks = pd.Series([o[1] for o in out]).value_counts()
         sc = scores(y, pred, baseline_value(data, cfg, t))
         rows.append({"target": t, "nested_q2": sc["q2"], "nested_rmse": sc["rmse"],
-                     "nested_rmse_pct": sc["rmse_pct"],
+                     "nested_rmse_pct": sc["rmse_pct"], "nested_max_err_pct": sc["max_abs_err_pct"],
                      "models picked (of %d folds)" % n: ", ".join(f"{m} {c}" for m, c in picks.items())})
     return pd.DataFrame(rows).set_index("target")
 
@@ -1053,7 +1097,7 @@ def later_runs_test(data: pd.DataFrame, cfg: dict, targets=None, feature_set: st
     split = cfg.get("later_runs_from")
     if split is None:
         return None
-    targets = targets or cfg["targets"]
+    targets = targets or cfg.get("key_targets", cfg["targets"])
     zoo = model_zoo()
     models = models or list(zoo)
     des = design_rows(data, cfg)
@@ -1070,9 +1114,11 @@ def later_runs_test(data: pd.DataFrame, cfg: dict, targets=None, feature_set: st
                 worst = des.index[test][int(np.argmax(np.abs(err)))]
                 scale = baseline_value(data, cfg, t)
                 rmse = float(np.sqrt(np.mean(err ** 2)))
+                mx = float(np.max(np.abs(err)))
                 rows.append({"target": t, "features": fs_name, "model": m, "rmse": rmse,
                              "rmse_pct": 100 * rmse / scale if scale else np.nan,
-                             "max_abs_err": float(np.max(np.abs(err))), "worst_run": worst})
+                             "max_abs_err": mx, "max_abs_err_pct": 100 * mx / scale if scale else np.nan,
+                             "worst_run": worst})
     res = pd.DataFrame(rows)
     res.attrs.update(n_train=len(train), n_test=len(test),
                      train_runs=compress_runs(list(des.index[train])),
@@ -1149,39 +1195,59 @@ def baseline_check(data: pd.DataFrame, cfg: dict, selection: pd.DataFrame,
 
 
 # ----- plots ---------------------------------------------------------------------------
-def plot_model_comparison(cv: CVResult, cfg: dict):
-    """Leave-one-out Q2 of every model, per target; one panel per feature set."""
+def plot_model_comparison(cv: CVResult, cfg: dict, targets=None,
+                          metrics=("q2", "rmse_pct", "max_abs_err_pct")):
+    """Three error views side by side for every model and key target.
+
+    Bars: physics features. Hollow diamonds: the same model on raw inputs. Amber: the
+    model the selection rule picks (simplest within tolerance of the lowest RMSE).
+    """
     m = cv.metrics
-    fsets = list(dict.fromkeys(m["features"]))
-    targets = list(dict.fromkeys(m["target"]))
+    targets = targets or [t for t in cfg.get("key_targets", cfg["targets"]) if t in set(m["target"])]
     models = [x for x in MODEL_ORDER if x in set(m["model"])]
-    fig, axes = plt.subplots(1, len(fsets), figsize=(6.2 * len(fsets), 0.9 + 1.05 * len(targets) * len(models) * 0.32 + 0.6),
-                             squeeze=False, sharex=True)
-    for ax, fs in zip(axes.flat, fsets):
-        sub = m[m["features"] == fs]
-        ypos, labels_, k = [], [], 0
-        for t in targets:
-            g = sub[sub["target"] == t].set_index("model")
-            best = g.loc[[x for x in models if x not in CONTRAST_ONLY], "rmse"].idxmin()
-            for mod in models:
-                q = g.loc[mod, "q2"]
-                ax.barh(k, max(q, 0), color=ACCENT if mod == best else INK3,
-                        alpha=1 if mod == best else 0.45, height=0.75)
-                ax.text(max(q, 0) + 0.01, k, f"{q:.2f}" if q >= 0 else f"< 0 ({q:.2f})", va="center",
-                        fontsize=8, color=INK if mod == best else INK2,
-                        fontweight="bold" if mod == best else "normal")
-                ypos.append(k)
-                labels_.append(f"{short(cfg, t)} · {mod}")
-                k += 1
-            k += 0.8
-        ax.set_yticks(ypos, labels_, fontsize=8)
-        ax.invert_yaxis()
-        ax.set_xlim(0, 1.15)
-        ax.set_xlabel("Leave-one-out Q² [-] (1 = perfect, 0 = no better than the mean)")
-        ax.set_title(f"{fs.capitalize()} features")
-    fig.suptitle(f"{cfg['title']}: model accuracy on runs left out (amber = lowest RMSE among candidates)",
+    phys = m[m["features"] == "physics"].set_index(["target", "model"])
+    raw = m[m["features"] == "raw"].set_index(["target", "model"]) if "raw" in set(m["features"]) else None
+    rows = [(t, mod) for t in targets for mod in models]
+    ypos, y, prev = [], 0.0, None
+    for t, _ in rows:
+        if prev is not None and t != prev:
+            y += 0.8
+        ypos.append(y)
+        y += 1
+        prev = t
+    chosen = {t: _choose(phys.loc[t]["rmse"].to_dict(), S.SELECTION_TOLERANCE)[0] for t in targets}
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4.3 * len(metrics) + 2.2, 0.75 + 0.27 * y),
+                             squeeze=False, sharey=True)
+    for ax, met in zip(axes.flat, metrics):
+        vals = np.array([phys.loc[r, met] for r in rows])
+        xmax = 1.0 if met == "q2" else np.nanmax(np.concatenate(
+            [vals, [raw.loc[r, met] for r in rows if raw is not None and r in raw.index]])) * 1.25
+        for yy, r, v in zip(ypos, rows, vals):
+            on = chosen[r[0]] == r[1]
+            ax.barh(yy, max(v, 0), height=0.72, color=ACCENT if on else INK3, alpha=1 if on else 0.45)
+            right = max(v, 0)
+            if raw is not None and r in raw.index:
+                rv = min(max(raw.loc[r, met], 0), xmax)
+                ax.scatter(rv, yy, marker="D", s=22, facecolor="white", edgecolor=INK, linewidth=0.9, zorder=4)
+                right = max(right, rv)
+            txt = (f"< 0 ({v:.2f})" if v < 0 else f"{v:.2f}") if met == "q2" else f"{v:.1f}"
+            ax.text(right + 0.03 * xmax, yy, txt, va="center", fontsize=7.5,
+                    color=INK if on else INK2, fontweight="bold" if on else "normal")
+        ax.set_xlim(0, xmax * (1.2 if met == "q2" else 1.08))
+        ax.set_xlabel(METRIC_LABELS[met])
+        better = "higher is better" if met == "q2" else "lower is better"
+        ax.set_title(f"{METRIC_LABELS[met].split(' [')[0]} ({better})")
+    axes.flat[0].set_yticks(ypos, [f"{short(cfg, t)} \u00b7 {mod}" for t, mod in rows], fontsize=8)
+    axes.flat[0].invert_yaxis()
+    handles = [matplotlib.patches.Patch(color=ACCENT, label="chosen model (physics features)"),
+               matplotlib.patches.Patch(color=INK3, alpha=0.45, label="other models (physics features)")]
+    if raw is not None:
+        handles.append(matplotlib.lines.Line2D([], [], marker="D", ls="", markerfacecolor="white",
+                                               markeredgecolor=INK, label="same model, raw inputs"))
+    fig.legend(handles=handles, loc="upper right", ncol=len(handles), fontsize=8.5)
+    fig.suptitle(f"{cfg['title']}: accuracy on runs left out of training",
                  x=0.01, ha="left", fontsize=12, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     return fig
 
 
@@ -1274,38 +1340,693 @@ def findings_models(cfg: dict, cv: CVResult, sel: pd.DataFrame, nested: pd.DataF
     """Markdown bullets summarising sections 5-6 for the selected dataset."""
     items = []
     m = cv.metrics
-    for t, s in sel.iterrows():
+    key = [t for t in cfg.get("key_targets", cfg["targets"]) if t in sel.index]
+    for t in key:
+        s = sel.loc[t]
         unit = cfg["units"].get(t, "")
-        line = (f"**{short(cfg, t)}**: {s['model']} ({s['reason']}); leave-one-out Q² = {s['q2']:.2f}, "
-                f"RMSE = {s['rmse']:.3g} {unit} ({s['rmse_pct']:.1f} % of baseline).")
+        line = (f"**{short(cfg, t)}**: {s['model']} ({s['reason']}). Unseen runs: Q\u00b2 = {s['q2']:.2f}, "
+                f"RMSE = {s['rmse']:.3g} {unit} ({s['rmse_pct']:.1f} % of baseline), "
+                f"worst miss {s['max_abs_err_pct']:.1f} %.")
         if t in nested.index:
             nr = nested.loc[t]
-            line += (f" Nested (model choice included): Q² = {nr['nested_q2']:.2f}, "
-                     f"RMSE {nr['nested_rmse_pct']:.1f} % of baseline.")
+            line += (f" With the model choice included (nested): Q\u00b2 = {nr['nested_q2']:.2f}, "
+                     f"RMSE {nr['nested_rmse_pct']:.1f} %.")
         if "raw" in set(m["features"]):
-            r = m[(m.target == t) & (m.features == "raw") & (m.model == s["model"])].iloc[0]
-            line += f" Same model on raw inputs: Q² = {r['q2']:.2f}."
+            r = m[(m.target == t) & (m.features == "raw") & (m.model == s["model"])]
+            if len(r):
+                r = r.iloc[0]
+                line += f" Same model on raw inputs: Q\u00b2 = {r['q2']:.2f}, RMSE {r['rmse_pct']:.1f} %."
         items.append(line)
+    others = [t for t in sel.index if t not in key]
+    if others:
+        items.append("Other outputs (chosen model, unseen runs): " + "; ".join(
+            f"{short(cfg, t).lower()} {sel.loc[t, 'model']}, Q\u00b2 = {sel.loc[t, 'q2']:.2f}, "
+            f"RMSE {sel.loc[t, 'rmse_pct']:.1f} %" for t in others) + ".")
     if later is not None:
         sub = later[later.features == "physics"]
         parts = []
-        for t, s in sel.iterrows():
-            r = sub[(sub.target == t) & (sub.model == s["model"])].iloc[0]
-            parts.append(f"{short(cfg, t).lower()} {r['rmse_pct']:.1f} % of baseline (worst {r['worst_run']})")
-        items.append(f"Later-runs test ({later.attrs['train_runs']} → {later.attrs['test_runs']}), "
-                     f"chosen models: RMSE " + "; ".join(parts) + ".")
+        for t in key:
+            r = sub[(sub.target == t) & (sub.model == sel.loc[t, "model"])].iloc[0]
+            parts.append(f"{short(cfg, t).lower()} RMSE {r['rmse_pct']:.1f} %, worst {r['max_abs_err_pct']:.1f} % "
+                         f"({r['worst_run']})")
+        items.append(f"Later-runs test ({later.attrs['train_runs']} \u2192 {later.attrs['test_runs']}), "
+                     f"chosen models: " + "; ".join(parts) + ".")
     for c in coverage:
         verdict = ("well calibrated" if c["calibration"] <= 1.15 else
-                   f"too narrow: widen by {c['calibration']:.2f}× "
+                   f"too narrow: widen by {c['calibration']:.2f}\u00d7 "
                    f"(then {100 * c['inside_95_calibrated']:.0f} % inside)")
         items.append(f"Gaussian process bands, {short(cfg, c['target']).lower()}: {100 * c['inside_95']:.0f} % "
                      f"of runs inside the 95 % band, {verdict}"
                      + (f"; outside: {compress_runs(c['outside_95'])}." if c["outside_95"] else "."))
     if sens is not None:
-        items.append("Data variants (Run 17): " + "; ".join(
-            f"{v} Q² = {r['q2']:.2f}, RMSE {r['rmse_pct']:.1f} %" for v, r in sens.iterrows()) + ".")
+        u = cfg["units"].get(key[0], "")
+        items.append(f"Data variants (Run 17), {short(cfg, key[0]).lower()}: " + "; ".join(
+            f"{v} Q\u00b2 = {r['q2']:.2f}, RMSE {r['rmse_pct']:.1f} %, worst miss {r['max_abs_err']:.3f} {u}"
+            for v, r in sens.iterrows()) + ".")
     if base is not None:
         items.append("Baseline never used in training: " + "; ".join(
             f"{short(cfg, t).lower()} predicted {r['predicted']:.3f} vs measured {r['measured']:.3f} "
-            f"({r['error_pct']:+.1f} %)" for t, r in base.iterrows()) + " (geometry assumed, A3).")
+            f"({r['error_pct']:+.1f} %)" for t, r in base.loc[[t for t in key if t in base.index]].iterrows())
+            + " (geometry assumed, A3).")
+    return md(f"**Findings for this dataset ({cfg['name']}):**\n\n" + _bullets(items))
+
+
+# ======================================================================================
+# 9. Interpretation (notebook section 7)
+# ======================================================================================
+def fit_final_models(data: pd.DataFrame, cfg: dict, selection: pd.DataFrame,
+                     feature_set: str = "physics") -> dict:
+    """Fit the chosen model of every target on all runs with complete inputs."""
+    des = design_rows(data, cfg)
+    X = des[feature_sets(cfg)[feature_set]].to_numpy(float)
+    zoo = model_zoo()
+    return {t: zoo[s["model"]]().fit(X, des[t].to_numpy(float)) for t, s in selection.iterrows()}
+
+
+def _predict(model, X):
+    """Mean and standard deviation (NaN for models without one)."""
+    X = np.asarray(X, float)
+    if isinstance(model, GaussianProcessModel):
+        return model.predict(X, return_std=True)
+    return model.predict(X), np.full(len(X), np.nan)
+
+
+def physics_from_raw(raw: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Add the derived physics features to a table of raw inputs."""
+    out = raw.copy()
+    for name, fn in cfg["derived"].items():
+        out[name] = fn(out)
+    return out
+
+
+def raw_from_physics(phys: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Add the raw inputs implied by a table of physics features (inverse map in settings)."""
+    out = phys.copy()
+    if cfg.get("to_raw"):
+        for k, v in cfg["to_raw"](out).items():
+            out[k] = v
+    for name, fn in cfg["derived"].items():
+        if name not in out:
+            out[name] = fn(out)
+    return out
+
+
+def tested_ranges(data: pd.DataFrame, cfg: dict, cols=None) -> dict:
+    """Min and max of each feature over the tested runs."""
+    des = design_rows(data, cfg)
+    cols = cols or feature_sets(cfg)["physics"]
+    return {c: (float(des[c].min()), float(des[c].max())) for c in cols}
+
+
+def reference_design(data: pd.DataFrame, cfg: dict) -> pd.Series:
+    """Today's design: the baseline geometry (A3), unknown inputs at mid-range."""
+    b = baseline_point(data, cfg)
+    raw = {c: (b[c] if b is not None and pd.notna(b.get(c, np.nan)) else float(np.mean(cfg["bounds"][c])))
+           for c in cfg["inputs"]}
+    return physics_from_raw(pd.DataFrame([raw]), cfg).iloc[0]
+
+
+def sobol_indices(model, data: pd.DataFrame, cfg: dict, n: int | None = None) -> pd.DataFrame | None:
+    """Global sensitivity of one model's prediction to each physics feature.
+
+    S1 = share of the output variance caused by the feature alone; ST = share including
+    its interactions with other features. Features are varied independently over their
+    tested ranges; ``attrs['outside_limits_share']`` gives the share of those samples
+    whose implied raw inputs lie outside the design limits (where the model extrapolates).
+    """
+    from SALib.analyze import sobol as sobol_analyze
+    from SALib.sample import sobol as sobol_sample
+    cols = feature_sets(cfg)["physics"]
+    if len(cols) < 2:
+        return None
+    rng = tested_ranges(data, cfg, cols)
+    problem = {"num_vars": len(cols), "names": cols, "bounds": [list(rng[c]) for c in cols]}
+    X = sobol_sample.sample(problem, n or S.SOBOL_N, calc_second_order=False, scramble=True,
+                            seed=S.RANDOM_STATE)
+    Y = _predict(model, X)[0]
+    si = sobol_analyze.analyze(problem, Y, calc_second_order=False, print_to_console=False,
+                               seed=S.RANDOM_STATE)
+    res = pd.DataFrame({"S1": si["S1"], "S1_conf": si["S1_conf"], "ST": si["ST"], "ST_conf": si["ST_conf"]},
+                       index=cols).clip(lower=0)
+    raw = raw_from_physics(pd.DataFrame(X, columns=cols), cfg)
+    inside = np.ones(len(raw), bool)
+    for c in cfg["inputs"]:
+        lo, hi = cfg["bounds"][c]
+        inside &= raw[c].between(lo - 1e-9, hi + 1e-9).to_numpy()
+    res.attrs["outside_limits_share"] = float(1 - inside.mean())
+    return res.sort_values("ST", ascending=False)
+
+
+def plot_sobol(sobols: dict, cfg: dict):
+    """Total-effect (ST) and first-order (S1) Sobol indices per key target."""
+    items = [(t, s) for t, s in sobols.items() if s is not None]
+    fig, axes = plt.subplots(1, len(items), figsize=(4.4 * len(items), 0.9 + 0.55 * len(items[0][1])),
+                             squeeze=False, sharex=True)
+    for ax, (t, sv) in zip(axes.flat, items):
+        y = np.arange(len(sv))
+        ax.barh(y, sv["ST"], height=0.6, color=ACCENT, alpha=0.9, label="total effect (ST)")
+        ax.barh(y, sv["S1"], height=0.28, color=INK, label="alone (S1)")
+        for yy, v in zip(y, sv["ST"]):
+            ax.text(v + 0.02, yy, f"{v:.2f}", va="center", fontsize=8, color=INK)
+        ax.set_yticks(y, [short(cfg, c) for c in sv.index], fontsize=9)
+        ax.invert_yaxis()
+        ax.set_xlim(0, 1.15)
+        ax.set_xlabel("Share of output variance [-]")
+        ax.set_title(short(cfg, t))
+    axes.flat[0].legend(fontsize=8, loc="lower right")
+    fig.suptitle(f"{cfg['title']}: which feature drives each output (Sobol indices over the tested ranges)",
+                 x=0.01, ha="left", fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    return fig
+
+
+def gp_relevance(models: dict, cfg: dict) -> pd.DataFrame | None:
+    """GP length scales per feature (short = matters, > 100 = switched off) for GP-chosen targets."""
+    cols = feature_sets(cfg)["physics"]
+    rows = {t: m.length_scales() for t, m in models.items() if isinstance(m, GaussianProcessModel)}
+    if not rows:
+        return None
+    return pd.DataFrame(rows, index=[short(cfg, c) for c in cols]).T.rename_axis("target")
+
+
+# ======================================================================================
+# 10. Prediction and design (notebook sections 8-9)
+# ======================================================================================
+def conformal_intervals(cv: CVResult, selection: pd.DataFrame, level: float | None = None) -> pd.DataFrame:
+    """Prediction intervals calibrated on the leave-one-out errors of the chosen models.
+
+    For each target the half-width is the conformal quantile of the unseen-run errors:
+    the k-th smallest of n errors with k = ceil((n + 1) * level). If the model has a
+    standard deviation (Gaussian process), the errors are first divided by it
+    ("normalised"), so the band is wider where the model is less sure. Otherwise the
+    band has a constant width ("absolute").
+    """
+    level = S.INTERVAL_LEVEL if level is None else level
+    rows = []
+    for t, sel in selection.iterrows():
+        p = cv.pred(t, sel["features"], sel["model"])
+        normalised = p["std"].notna().all()
+        sc = (p["error"].abs() / p["std"] if normalised else p["error"].abs()).sort_values().to_numpy()
+        n = len(sc)
+        k = math.ceil((n + 1) * level)
+        rows.append({"target": t, "model": sel["model"], "kind": "normalised" if normalised else "absolute",
+                     "level": level, "n": n, "k": min(k, n), "q": float(sc[min(k, n) - 1]),
+                     "capped": k > n})
+    return pd.DataFrame(rows).set_index("target")
+
+
+def _with_interval(model, conf_row, X):
+    mu, sd = _predict(model, X)
+    half = conf_row["q"] * sd if conf_row["kind"] == "normalised" else np.full(len(mu), conf_row["q"])
+    return mu, mu - half, mu + half, sd
+
+
+def range_checker(data: pd.DataFrame, cfg: dict) -> dict:
+    """Reference for the out-of-range warning, built from the tested runs."""
+    des = design_rows(data, cfg)
+    cols = cfg["range_features"]
+    Z = des[cols].to_numpy(float)
+    mean, std = Z.mean(axis=0), Z.std(axis=0)
+    std[std == 0] = 1.0
+    Zs = (Z - mean) / std
+    D = cdist(Zs, Zs)
+    np.fill_diagonal(D, np.inf)
+    return {"cols": cols, "mean": mean, "std": std, "Zs": Zs, "runs": list(des.index),
+            "threshold": float(D.min(axis=1).max()),
+            "ranges": tested_ranges(data, cfg, cols)}
+
+
+def range_status(designs: pd.DataFrame, cfg: dict, checker: dict) -> pd.DataFrame:
+    """Status of each design: inside tested range / far from tested runs /
+    outside tested range / outside design limits (in that order of severity)."""
+    raw_ok = np.ones(len(designs), bool)
+    for c in cfg["inputs"]:
+        lo, hi = cfg["bounds"][c]
+        raw_ok &= designs[c].between(lo - 1e-9, hi + 1e-9).to_numpy()
+    rng_ok = np.ones(len(designs), bool)
+    for c, (lo, hi) in checker["ranges"].items():
+        rng_ok &= designs[c].between(lo - 1e-9, hi + 1e-9).to_numpy()
+    Zs = (designs[checker["cols"]].to_numpy(float) - checker["mean"]) / checker["std"]
+    D = cdist(Zs, checker["Zs"])
+    nn = D.min(axis=1)
+    nearest = [checker["runs"][i] for i in D.argmin(axis=1)]
+    status = np.select([~raw_ok, ~rng_ok, nn > checker["threshold"]],
+                       ["outside design limits", "outside tested range", "far from tested runs"],
+                       "inside tested range")
+    return pd.DataFrame({"status": status, "nearest_run": nearest, "distance": nn}, index=designs.index)
+
+
+def predict_designs(designs: pd.DataFrame, data: pd.DataFrame, cfg: dict, models: dict,
+                    conf: pd.DataFrame, checker: dict | None = None) -> pd.DataFrame:
+    """What-if prediction: every modelled output with its interval, plus a range status.
+
+    ``designs`` holds the raw inputs (one row per design, optional column 'design' as name).
+    """
+    d = designs.copy()
+    if "design" in d.columns:
+        d = d.set_index("design")
+    missing = [c for c in cfg["inputs"] if c not in d.columns]
+    if missing:
+        raise KeyError(f"Designs lack inputs {missing}; every design needs {cfg['inputs']}")
+    d = physics_from_raw(d[cfg["inputs"]].astype(float), cfg)
+    checker = checker or range_checker(data, cfg)
+    out = d.join(range_status(d, cfg, checker))
+    X = d[feature_sets(cfg)["physics"]].to_numpy(float)
+    for t, m in models.items():
+        mu, lo, hi, _ = _with_interval(m, conf.loc[t], X)
+        out[t], out[f"{t}_low"], out[f"{t}_high"] = mu, lo, hi
+        base = baseline_value(data, cfg, t)
+        if base:
+            out[f"{t}_vs_baseline_pct"] = 100 * (mu / base - 1)
+    comps = [c for c in cfg["components"] if c in models]
+    if comps and len(comps) == len(cfg["components"]) and cfg["total"] in models:
+        out["coolers_sum_minus_total"] = out[comps].sum(axis=1) - out[cfg["total"]]
+    return out
+
+
+def what_if_designs(cfg: dict) -> pd.DataFrame:
+    """Example designs from the settings (edit them in the notebook or in settings.py)."""
+    return pd.DataFrame(cfg["what_if"])
+
+
+def show_predictions(pred: pd.DataFrame, cfg: dict, targets=None) -> pd.DataFrame:
+    """Compact what-if table: status and 'value [low, high]' per target."""
+    targets = targets or [t for t in cfg.get("key_targets", cfg["targets"]) if t in pred.columns]
+    out = pd.DataFrame(index=pred.index)
+    for c in [*cfg["inputs"], *[k for k in cfg["derived"]]]:
+        out[short(cfg, c)] = pred[c].round(3)
+    out["status"] = pred["status"]
+    for t in targets:
+        unit = cfg["units"].get(t, "")
+        out[f"{short(cfg, t)} [{unit}]"] = [f"{m:.3f} [{lo:.3f}, {hi:.3f}]" for m, lo, hi in
+                                            zip(pred[t], pred[f"{t}_low"], pred[f"{t}_high"])]
+        if f"{t}_vs_baseline_pct" in pred:
+            out[f"{short(cfg, t)} vs baseline"] = [f"{v:+.1f} %" for v in pred[f"{t}_vs_baseline_pct"]]
+    return out
+
+
+def design_pool(data: pd.DataFrame, cfg: dict, n: int | None = None,
+                keep=("inside tested range",), checker: dict | None = None) -> pd.DataFrame:
+    """Candidate designs: a scrambled Sobol sample of the raw inputs within the design
+    limits, with physics features and range status; only statuses in ``keep`` remain."""
+    n = n or S.POOL_SIZE
+    lows = np.array([cfg["bounds"][c][0] for c in cfg["inputs"]])
+    highs = np.array([cfg["bounds"][c][1] for c in cfg["inputs"]])
+    u = qmc.Sobol(d=len(lows), scramble=True, seed=S.RANDOM_STATE).random_base2(int(np.log2(n)))
+    raw = pd.DataFrame(qmc.scale(u, lows, highs), columns=cfg["inputs"])
+    pool = physics_from_raw(raw, cfg)
+    pool = pool.join(range_status(pool, cfg, checker or range_checker(data, cfg)))
+    return pool[pool["status"].isin(keep)].reset_index(drop=True)
+
+
+def _constraint_mask(pred: pd.DataFrame, data: pd.DataFrame, cfg: dict) -> tuple[np.ndarray, list]:
+    ok = np.ones(len(pred), bool)
+    text = []
+    for t, op, val in cfg["optimisation"]["constraints"]:
+        thr = baseline_value(data, cfg, t) if val == "baseline" else float(val)
+        ok &= (pred[t] >= thr).to_numpy() if op == ">=" else (pred[t] <= thr).to_numpy()
+        text.append(f"{short(cfg, t)} {op} {thr:.3f} {cfg['units'].get(t, '')}"
+                    + (" (baseline)" if val == "baseline" else ""))
+    return ok, text
+
+
+def optimise(data: pd.DataFrame, cfg: dict, models: dict, conf: pd.DataFrame,
+             checker: dict | None = None) -> pd.DataFrame:
+    """Best design inside the tested range under the goal and constraints in the settings (A6).
+
+    Two answers: the highest predicted value, and the cautious one with the highest lower
+    interval bound. The best measured run that meets the constraints is added for comparison.
+    """
+    checker = checker or range_checker(data, cfg)
+    target = cfg["optimisation"]["maximise"]
+    pool = design_pool(data, cfg, checker=checker)
+    pred = predict_designs(pool[cfg["inputs"]], data, cfg, models, conf, checker)
+    ok, text = _constraint_mask(pred, data, cfg)
+    feas = pred[ok]
+    if feas.empty:
+        raise RuntimeError("No candidate design meets the constraints inside the tested range.")
+    rows = {"highest predicted": feas[target].idxmax(), "highest lower bound (cautious)": feas[f"{target}_low"].idxmax()}
+    res = feas.loc[list(rows.values())].copy()
+    res.index = list(rows)
+    des = design_rows(data, cfg)
+    meas_ok = np.ones(len(des), bool)
+    for t, op, val in cfg["optimisation"]["constraints"]:
+        thr = baseline_value(data, cfg, t) if val == "baseline" else float(val)
+        meas_ok &= (des[t] >= thr).to_numpy() if op == ">=" else (des[t] <= thr).to_numpy()
+    best_run = des[meas_ok][target].idxmax()
+    br = des.loc[[best_run], [*cfg["inputs"], *cfg["derived"], *models]].copy()
+    br.index = [f"best measured ({best_run})"]
+    res = pd.concat([res, br])
+    res.attrs.update(constraints=text, n_pool=len(pool), n_feasible=int(ok.sum()), target=target)
+    return res
+
+
+def tradeoff(data: pd.DataFrame, cfg: dict, models: dict, conf: pd.DataFrame,
+             checker: dict | None = None):
+    """Predicted trade-off between two outputs over the candidate designs (tested range only).
+
+    Returns the candidate predictions and the Pareto front (designs that cannot improve one
+    output without worsening the other), or None if no trade-off is defined.
+    """
+    spec = cfg.get("tradeoff")
+    if not spec:
+        return None, None
+    (a, da), (b, db) = spec
+    pool = design_pool(data, cfg, checker=checker)
+    pred = predict_designs(pool[cfg["inputs"]], data, cfg, models, conf, checker)
+    A = pred[a].to_numpy() * (1 if da == "max" else -1)
+    B = pred[b].to_numpy() * (1 if db == "max" else -1)
+    order = np.argsort(-A)
+    front, best_b = [], -np.inf
+    for i in order:
+        if B[i] > best_b:
+            front.append(i)
+            best_b = B[i]
+    return pred, pred.iloc[front].sort_values(a)
+
+
+def expected_improvement(mu, sd, best):
+    """Expected gain over ``best`` (maximisation) for normal predictions."""
+    sd = np.maximum(sd, 1e-12)
+    z = (mu - best) / sd
+    return (mu - best) * norm.cdf(z) + sd * norm.pdf(z)
+
+
+def _inside_hull(Z_pool: np.ndarray, Z_runs: np.ndarray) -> np.ndarray:
+    """True where a candidate lies inside the convex hull of the tested runs."""
+    if Z_runs.shape[1] == 1:
+        return (Z_pool[:, 0] >= Z_runs[:, 0].min()) & (Z_pool[:, 0] <= Z_runs[:, 0].max())
+    from scipy.spatial import Delaunay
+    return Delaunay(Z_runs).find_simplex(Z_pool) >= 0
+
+
+def suggest_next_runs(data: pd.DataFrame, cfg: dict, models: dict, conf: pd.DataFrame,
+                      calibration: float = 1.0, n_improve: int | None = None,
+                      n_explore: int | None = None, checker: dict | None = None) -> pd.DataFrame:
+    """Recommend the next runs to measure.
+
+    - "improve design": highest expected improvement (EI) of the goal output among designs
+      that meet the constraints. EI uses a Gaussian process fitted for this purpose (even
+      when another model was chosen for prediction), its uncertainty widened by the
+      calibration factor from section 6.6. Each pick is treated as measured (kriging
+      believer) and keeps a minimum distance from earlier picks, so the batch spreads out.
+    - "improve model": fills the largest gap. Among designs inside the tested region (the
+      convex hull of the runs in the range features), pick the one farthest from every
+      tested run and every earlier pick.
+    """
+    n_improve = S.N_NEXT_IMPROVE if n_improve is None else n_improve
+    n_explore = S.N_NEXT_EXPLORE if n_explore is None else n_explore
+    checker = checker or range_checker(data, cfg)
+    target = cfg["optimisation"]["maximise"]
+    cols = feature_sets(cfg)["physics"]
+    des = design_rows(data, cfg)
+    gp = GaussianProcessModel(restarts=S.GP_RESTARTS, random_state=S.RANDOM_STATE).fit(
+        des[cols].to_numpy(float), des[target].to_numpy(float))
+    pool = design_pool(data, cfg, keep=("inside tested range", "far from tested runs"), checker=checker)
+    pred = predict_designs(pool[cfg["inputs"]], data, cfg, models, conf, checker)
+    feas, _ = _constraint_mask(pred, data, cfg)
+    meas_ok = np.ones(len(des), bool)
+    for t, op, val in cfg["optimisation"]["constraints"]:
+        thr = baseline_value(data, cfg, t) if val == "baseline" else float(val)
+        meas_ok &= (des[t] >= thr).to_numpy() if op == ">=" else (des[t] <= thr).to_numpy()
+    best = float(des[meas_ok][target].max())
+    X = pool[cols].to_numpy(float)
+    Zp = (pool[checker["cols"]].to_numpy(float) - checker["mean"]) / checker["std"]
+    hull = _inside_hull(Zp, checker["Zs"])
+    min_gap = 0.5 * checker["threshold"]
+    k = max(calibration, 1.0)
+    picks, cur = [], gp
+    for _ in range(n_improve):
+        mu, sd = cur.predict(X, return_std=True)
+        sd = sd * k
+        score = np.where(feas, expected_improvement(mu, sd, best), -np.inf)
+        if picks:
+            near = cdist(Zp, Zp[[p[0] for p in picks]]).min(axis=1) < min_gap
+            score[near] = -np.inf
+        j = int(np.argmax(score))
+        picks.append((j, "improve design", float(score[j]), float(sd[j])))
+        cur = cur.conditioned(X[j:j + 1], mu[j:j + 1])
+    for _ in range(n_explore):
+        ref_pts = np.vstack([checker["Zs"], Zp[[p[0] for p in picks]]]) if picks else checker["Zs"]
+        dist = cdist(Zp, ref_pts).min(axis=1)
+        score = np.where(hull, dist, -np.inf)
+        j = int(np.argmax(score))
+        sd_j = float(cur.predict(X[j:j + 1], return_std=True)[1][0] * k)
+        picks.append((j, "improve model", float(dist[j]), sd_j))
+        cur = cur.conditioned(X[j:j + 1], cur.predict(X[j:j + 1]))
+    rows = pred.iloc[[p[0] for p in picks]].copy()
+    rows.insert(0, "purpose", [p[1] for p in picks])
+    rows["gp_std_calibrated"] = [p[3] for p in picks]
+    rows["expected_improvement"] = [p[2] if p[1] == "improve design" else np.nan for p in picks]
+    rows["gap_distance"] = [p[2] if p[1] == "improve model" else np.nan for p in picks]
+    rows.index = [f"N{i + 1}" for i in range(len(rows))]
+    rows.attrs.update(best_measured=best, target=target, n_pool=len(pool))
+    return rows
+
+
+# ----- plots (sections 7-9) -------------------------------------------------------------
+def _grid_status(phys: pd.DataFrame, cfg: dict, checker: dict) -> np.ndarray:
+    return range_status(raw_from_physics(phys, cfg), cfg, checker)["status"].to_numpy()
+
+
+def plot_effect_curves(data: pd.DataFrame, cfg: dict, models: dict, conf: pd.DataFrame,
+                       ref: pd.Series, targets=None, n: int = 60, checker: dict | None = None):
+    """How each output changes when one feature moves away from today's design.
+
+    Solid line: inside the tested range; dotted: far from tested runs or outside the design
+    limits. Shaded band: conformal interval. Grey dots: all runs (other features differ).
+    """
+    checker = checker or range_checker(data, cfg)
+    targets = targets or cfg.get("key_targets", cfg["targets"])
+    cols = feature_sets(cfg)["physics"]
+    des = design_rows(data, cfg)
+    rng = tested_ranges(data, cfg, cols)
+    fig, axes = plt.subplots(len(targets), len(cols), figsize=(3.4 * len(cols), 2.7 * len(targets)),
+                             squeeze=False, sharey="row")
+    for i, t in enumerate(targets):
+        for j, c in enumerate(cols):
+            ax = axes[i, j]
+            grid = np.linspace(*rng[c], n)
+            phys = pd.DataFrame([ref[cols].to_dict()] * n)
+            phys[c] = grid
+            mu, lo, hi, _ = _with_interval(models[t], conf.loc[t], phys[cols].to_numpy(float))
+            st = _grid_status(phys, cfg, checker)
+            ok = st == "inside tested range"
+            ax.fill_between(grid, lo, hi, color=DATA, alpha=0.15, lw=0)
+            ax.plot(grid, np.where(ok, mu, np.nan), color=DATA, lw=2)
+            ax.plot(grid, np.where(~ok, mu, np.nan), color=DATA, lw=1.5, ls=":")
+            ax.scatter(des[c], des[t], s=10, color=INK3, alpha=0.5, zorder=1)
+            ax.axvline(ref[c], color=INK, lw=0.9, ls="--")
+            if i == len(targets) - 1:
+                ax.set_xlabel(label(cfg, c), fontsize=9)
+            if j == 0:
+                ax.set_ylabel(label(cfg, t), fontsize=9)
+            ax.tick_params(labelsize=8)
+    fig.suptitle(f"{cfg['title']}: effect of each feature, others at today's design (dashed line); "
+                 f"band = {int(100 * conf['level'].iloc[0])} % interval, dotted = outside the tested region",
+                 x=0.01, ha="left", fontsize=11, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    return fig
+
+
+def plot_response_map(data: pd.DataFrame, cfg: dict, models: dict, conf: pd.DataFrame, ref: pd.Series,
+                      target: str, n: int = 70, checker: dict | None = None, ax=None,
+                      optimum: pd.DataFrame | None = None, proposals: pd.DataFrame | None = None):
+    """Predicted output over the two map features (others at today's design).
+
+    White: outside the design limits. Hatched: far from tested runs. Dots: tested runs.
+    Optional markers: the optimum (star) and proposed next runs (numbered).
+    """
+    pair = cfg.get("map_pair")
+    if not pair:
+        return None
+    checker = checker or range_checker(data, cfg)
+    cols = feature_sets(cfg)["physics"]
+    xa, ya = pair
+    rng = tested_ranges(data, cfg, [xa, ya])
+    gx, gy = np.meshgrid(np.linspace(*rng[xa], n), np.linspace(*rng[ya], n))
+    phys = pd.DataFrame([ref[cols].to_dict()] * gx.size)
+    phys[xa], phys[ya] = gx.ravel(), gy.ravel()
+    mu = _predict(models[target], phys[cols].to_numpy(float))[0].reshape(gx.shape)
+    st = _grid_status(phys, cfg, checker).reshape(gx.shape)
+    own = ax is None
+    if own:
+        fig, ax = plt.subplots(figsize=(7.6, 5.6))
+    else:
+        fig = ax.figure
+    Z = np.ma.masked_where(st == "outside design limits", mu)
+    cs = ax.contourf(gx, gy, Z, levels=14, cmap=SEQUENTIAL)
+    lines = ax.contour(gx, gy, Z, levels=7, colors="white", linewidths=0.6, alpha=0.8)
+    ax.clabel(lines, fontsize=7, fmt="%.2f")
+    far = np.ma.masked_where(st != "far from tested runs", np.ones_like(mu))
+    ax.contourf(gx, gy, far, levels=[0.5, 1.5], colors="none", hatches=["////"])
+    des = design_rows(data, cfg)
+    ax.scatter(des[xa], des[ya], s=18, color="white", edgecolor=INK, linewidth=0.8, zorder=3, label="tested runs")
+    ax.scatter([ref[xa]], [ref[ya]], s=70, facecolor="none", edgecolor=INK, linewidth=1.6, zorder=4,
+               label="today's design")
+    if optimum is not None:
+        o = optimum.iloc[0]
+        ax.scatter([o[xa]], [o[ya]], marker="*", s=220, color=ACCENT, edgecolor=INK, zorder=5,
+                   label="model optimum")
+    if proposals is not None:
+        for name, r in proposals.iterrows():
+            mk = "^" if r["purpose"] == "improve design" else "s"
+            ax.scatter([r[xa]], [r[ya]], marker=mk, s=70, color=FLAG if mk == "^" else "white",
+                       edgecolor=INK, zorder=5)
+            ax.annotate(name, (r[xa], r[ya]), xytext=(5, 4), textcoords="offset points", fontsize=8,
+                        fontweight="bold", color=INK)
+        ax.scatter([], [], marker="^", color=FLAG, edgecolor=INK, label="next run: improve design")
+        ax.scatter([], [], marker="s", color="white", edgecolor=INK, label="next run: improve model")
+    cb = fig.colorbar(cs, ax=ax, shrink=0.9)
+    cb.set_label(f"Predicted {label(cfg, target).lower()}")
+    ax.set_xlabel(label(cfg, xa))
+    ax.set_ylabel(label(cfg, ya))
+    note = "blank = outside design limits" + (", hatched = far from tested runs"
+                                              if (st == "far from tested runs").any() else "")
+    ax.set_title(f"{cfg['title']}: predicted {short(cfg, target).lower()}, other features at "
+                 f"today's design ({note})", fontsize=10)
+    ax.legend(fontsize=8, loc="best", framealpha=0.85, frameon=True)
+    if own:
+        fig.tight_layout()
+    return fig
+
+
+def plot_tradeoff(pred: pd.DataFrame, front: pd.DataFrame, data: pd.DataFrame, cfg: dict):
+    """Candidate designs (grey), the Pareto front (amber), tested runs (blue) and today's design."""
+    (a, da), (b, db) = cfg["tradeoff"]
+    des = design_rows(data, cfg)
+    fig, ax = plt.subplots(figsize=(7.4, 4.6))
+    ax.scatter(pred[a], pred[b], s=6, color=INK3, alpha=0.25, lw=0, label="candidate designs (predicted)")
+    ax.plot(front[a], front[b], color=ACCENT, lw=2, marker="o", ms=4, label="best trade-off (Pareto front)")
+    ax.scatter(des[a], des[b], s=24, color=DATA, edgecolor="white", zorder=3, label="tested runs")
+    if cfg["baseline_run"] in data.index:
+        ax.scatter([data.loc[cfg["baseline_run"], a]], [data.loc[cfg["baseline_run"], b]], s=80,
+                   facecolor="none", edgecolor=INK, linewidth=1.6, zorder=4, label="baseline")
+    ax.set_xlabel(f"{label(cfg, a)} ({'higher' if da == 'max' else 'lower'} is better)")
+    ax.set_ylabel(f"{label(cfg, b)} ({'higher' if db == 'max' else 'lower'} is better)")
+    ax.set_title(f"{cfg['title']}: trade-off between {short(cfg, a).lower()} and {short(cfg, b).lower()}")
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+    return fig
+
+
+def plot_next_runs_1d(data: pd.DataFrame, cfg: dict, models: dict, conf: pd.DataFrame, ref: pd.Series,
+                      proposals: pd.DataFrame, optimum: pd.DataFrame | None = None, n: int = 200):
+    """1-D datasets: prediction with interval along the single feature, plus the proposals."""
+    c = feature_sets(cfg)["physics"][0]
+    t = cfg["optimisation"]["maximise"]
+    lo_b, hi_b = cfg["bounds"][c]
+    grid = np.linspace(lo_b, hi_b, n)
+    mu, lo, hi, _ = _with_interval(models[t], conf.loc[t], grid.reshape(-1, 1))
+    des = design_rows(data, cfg)
+    fig, ax = plt.subplots(figsize=(7.4, 4.0))
+    ax.fill_between(grid, lo, hi, color=DATA, alpha=0.15, lw=0, label=f"{int(100 * conf.loc[t, 'level'])} % interval")
+    ax.plot(grid, mu, color=DATA, lw=2, label="prediction")
+    ax.scatter(des[c], des[t], s=30, color=INK, zorder=3, label="tested runs")
+    for name, r in proposals.iterrows():
+        ax.axvline(r[c], color=FLAG if r["purpose"] == "improve design" else INK3, lw=1, ls="--")
+        ax.annotate(name, (r[c], ax.get_ylim()[1]), xytext=(2, -12), textcoords="offset points", fontsize=8,
+                    fontweight="bold")
+    if optimum is not None:
+        o = optimum.iloc[0]
+        ax.scatter([o[c]], [o[t]], marker="*", s=200, color=ACCENT, edgecolor=INK, zorder=5, label="model optimum")
+    ax.set_xlabel(label(cfg, c))
+    ax.set_ylabel(label(cfg, t))
+    ax.set_title(f"{cfg['title']}: prediction, optimum and next runs (dashed lines)")
+    ax.legend(fontsize=8, loc="lower left")
+    fig.tight_layout()
+    return fig
+
+
+# ----- findings (sections 7-9) ----------------------------------------------------------
+def findings_interpretation(cfg: dict, sobols: dict, relevance: pd.DataFrame | None):
+    items = []
+    for t, sv in sobols.items():
+        if sv is None:
+            items.append(f"{short(cfg, t)}: only one feature, no sensitivity split.")
+            continue
+        parts = ", ".join(f"{short(cfg, c).lower()} {v:.2f}" for c, v in sv["ST"].items())
+        items.append(f"**{short(cfg, t)}**, total-effect indices: {parts}.")
+    shares = [sv.attrs["outside_limits_share"] for sv in sobols.values() if sv is not None]
+    if shares:
+        items.append(f"{100 * max(shares):.0f} % of the sampled feature combinations lie outside the design "
+                     "limits; there the model extrapolates, so treat small indices as approximate.")
+    if relevance is not None:
+        off = [c for c in relevance.columns if (relevance[c] > 100).all()]
+        if off:
+            items.append("Gaussian process switched off (length scale > 100 for every output): "
+                         + ", ".join(off) + ".")
+    return md(f"**Findings for this dataset ({cfg['name']}):**\n\n" + _bullets(items))
+
+
+def findings_prediction(cfg: dict, data: pd.DataFrame, conf: pd.DataFrame, pred: pd.DataFrame):
+    items = []
+    for t in cfg.get("key_targets", cfg["targets"]):
+        r = conf.loc[t]
+        base = baseline_value(data, cfg, t)
+        if r["kind"] == "absolute":
+            w = f"±{r['q']:.3g} {cfg['units'].get(t, '')}" + (f" ({100 * r['q'] / base:.1f} % of baseline)" if base else "")
+        else:
+            inside = pred["status"] == "inside tested range"
+            half = (pred[f"{t}_high"] - pred[t])[inside] if inside.any() else pred[f"{t}_high"] - pred[t]
+            w = (f"±{r['q']:.2f} × the GP standard deviation (for the example designs inside the tested "
+                 f"range: ±{half.min():.3g} to ±{half.max():.3g} {cfg['units'].get(t, '')})")
+        items.append(f"{short(cfg, t)}: {int(100 * r['level'])} % interval {w}"
+                     + (" (capped at the largest error: too few runs for this level)" if r["capped"] else "") + ".")
+    for name, r in pred.iterrows():
+        if r["status"] != "inside tested range":
+            items.append(f"'{name}' is **{r['status']}** (nearest run {r['nearest_run']}): treat its prediction as a guess.")
+    return md(f"**Findings for this dataset ({cfg['name']}):**\n\n" + _bullets(items))
+
+
+def findings_design(cfg: dict, data: pd.DataFrame, opt: pd.DataFrame, front: pd.DataFrame | None,
+                    nxt: pd.DataFrame):
+    t = opt.attrs["target"]
+    unit = cfg["units"].get(t, "")
+    base = baseline_value(data, cfg, t)
+    items = []
+    same = np.allclose(opt.iloc[0][cfg["inputs"]].to_numpy(float), opt.iloc[1][cfg["inputs"]].to_numpy(float))
+    names = opt.index[:1] if same else opt.index[:2]
+    if same:
+        items.append("The highest and the cautious optimum are the same design (the interval has a constant width).")
+    for name in names:
+        r = opt.loc[name]
+        geom = ", ".join(f"{short(cfg, c).lower()} {r[c]:.3g}" for c in [*cfg["inputs"], *cfg["derived"]])
+        items.append(f"**{name.capitalize()}**: {short(cfg, t).lower()} {r[t]:.3f} {unit} "
+                     f"[{r[f'{t}_low']:.3f}, {r[f'{t}_high']:.3f}]"
+                     + (f", {100 * (r[t] / base - 1):+.1f} % vs baseline" if base else "") + f" ({geom}).")
+    bm = opt.index[-1]
+    items.append(f"For comparison, {bm}: {opt.loc[bm, t]:.3f} {unit}.")
+    if opt.attrs["constraints"]:
+        items.append("Constraints (A6, placeholder): " + "; ".join(opt.attrs["constraints"]) + ".")
+    if front is not None and len(front):
+        (a, da), (b, db) = cfg["tradeoff"]
+        ua, ub = cfg["units"].get(a, ""), cfg["units"].get(b, "")
+        items.append(f"Trade-off front: {len(front)} designs from {short(cfg, a).lower()} "
+                     f"{front[a].min():.3f} to {front[a].max():.3f} {ua}, with "
+                     f"{short(cfg, b).lower()} {front[b].min():.3f} to {front[b].max():.3f} {ub}.")
+        ba, bb = baseline_value(data, cfg, a), baseline_value(data, cfg, b)
+        if da == "max" and db == "min" and ba and bb:
+            f = front[front[a] >= ba]
+            if len(f):
+                r = f.loc[f[b].idxmin()]
+                items.append(f"At today's {short(cfg, a).lower()} ({ba:.3f} {ua}) the front needs only "
+                             f"{r[b]:.2f} {ub} {short(cfg, b).lower()} (baseline {bb:.2f} {ub}, "
+                             f"{100 * (r[b] / bb - 1):+.0f} %), at immersion {r.get('imm', np.nan):.2f}.")
+            des = design_rows(data, cfg)
+            m = des[des[a] >= 0.99 * ba]
+            if len(m):
+                rm = m.loc[m[b].idxmin()]
+                items.append(f"Measured evidence: {m[b].idxmin()} delivers {rm[a]:.3f} {ua} with "
+                             f"{rm[b]:.2f} {ub} ({100 * (rm[b] / bb - 1):+.0f} % vs baseline).")
+    imp = nxt[nxt["purpose"] == "improve design"]
+    exp = nxt[nxt["purpose"] == "improve model"]
+    key = cfg.get("map_pair", [cfg["key_x"]])[0] if cfg.get("map_pair") else cfg["key_x"]
+    if len(imp):
+        items.append(f"Next runs to improve the design: {', '.join(imp.index)} at {short(cfg, key).lower()} "
+                     + ", ".join(f"{v:.3g}" for v in imp[key]) + ".")
+    if len(exp):
+        items.append(f"Next runs to improve the model: {', '.join(exp.index)} at {short(cfg, key).lower()} "
+                     + ", ".join(f"{v:.3g}" for v in exp[key]) + " (status: "
+                     + ", ".join(exp["status"]) + ").")
     return md(f"**Findings for this dataset ({cfg['name']}):**\n\n" + _bullets(items))
